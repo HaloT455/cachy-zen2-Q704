@@ -1,0 +1,432 @@
+name: Build CachyOS Zen2 EEVDF Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "linux-*"
+
+permissions:
+  contents: write
+
+env:
+  KERNEL_REPO: https://github.com/CachyOS/linux.git
+  KERNEL_REF: master
+
+  CONFIG_URL: https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos-eevdf/config
+
+  KERNEL_SUFFIX: "-cachyos-zen2-eevdf"
+  LLVM_VERSION: "23.1.2"
+  LLVM_DIR: "/opt/llvm"
+
+jobs:
+
+  build:
+    name: Build kernel
+    runs-on: ubuntu-24.04
+
+    env:
+      LIBCLANG_PATH: /opt/llvm/lib
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            flex \
+            fakeroot \
+            libelf-dev \
+            libssl-dev \
+            libdw-dev \
+            dwarves \
+            gettext \
+            git \
+            kmod \
+            libncurses-dev \
+            openssl \
+            pahole \
+            perl \
+            python3 \
+            rsync \
+            tar \
+            xz-utils \
+            zstd \
+            curl
+
+      - name: Install LLVM
+        run: |
+          curl -fL \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz" \
+            -o /tmp/llvm.tar.xz
+
+          sudo mkdir -p "${LLVM_DIR}"
+          sudo chown "$(id -u):$(id -g)" "${LLVM_DIR}"
+
+          tar -xJf /tmp/llvm.tar.xz \
+            --strip-components=1 \
+            -C "${LLVM_DIR}"
+
+          echo "${LLVM_DIR}/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=${LLVM_DIR}/lib" >> "$GITHUB_ENV"
+
+          export PATH="${LLVM_DIR}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${LLVM_DIR}/lib"
+
+          clang --version
+          ld.lld --version
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:${PATH}"
+
+          rustup component add rust-src
+
+          rustc --version
+          cargo --version
+
+      - name: Install bindgen
+        run: |
+          cargo install bindgen-cli
+          bindgen --version
+
+      - name: Checkout kernel
+        run: |
+          git clone \
+            --depth=1 \
+            --branch="${KERNEL_REF}" \
+            "${KERNEL_REPO}" \
+            kernel
+
+      - name: Fetch CachyOS EEVDF config
+        working-directory: kernel
+        run: |
+          curl -fL "${CONFIG_URL}" -o .config
+
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          # CPU target: MZEN2 only exists when the CPU-optimization patch is applied.
+          # Otherwise fall back to GENERIC_CPU + -march=znver2.
+          scripts/config --disable X86_NATIVE_CPU || true
+          if grep -q '^config MZEN2' arch/x86/Kconfig.cpu; then
+            echo "MZEN2 available, using it"
+            scripts/config --disable GENERIC_CPU
+            scripts/config --enable MZEN2
+            echo "CPU_CFLAGS=" >> "$GITHUB_ENV"
+          else
+            echo "MZEN2 not available, using GENERIC_CPU with -march=znver2"
+            scripts/config --enable GENERIC_CPU
+            echo "CPU_CFLAGS=-march=znver2" >> "$GITHUB_ENV"
+          fi
+
+          # ThinLTO (Full LTO is likely to OOM or time out on hosted runners)
+          scripts/config --disable LTO_NONE
+          scripts/config --disable LTO_CLANG_FULL
+          scripts/config --enable LTO_CLANG_THIN
+
+          # -O3 option only exists with the CachyOS patches
+          if grep -rq 'CC_OPTIMIZE_FOR_PERFORMANCE_O3' init/Kconfig; then
+            scripts/config --disable CC_OPTIMIZE_FOR_PERFORMANCE
+            scripts/config --enable CC_OPTIMIZE_FOR_PERFORMANCE_O3
+          else
+            echo "O3 option not available, keeping default"
+          fi
+
+          # Disable debug info and BTF to save disk space and build time
+          scripts/config --enable DEBUG_INFO_NONE
+          scripts/config --disable DEBUG_INFO_BTF
+          scripts/config --disable DEBUG_INFO_BTF_MODULES
+
+          scripts/config --set-str LOCALVERSION "${KERNEL_SUFFIX}"
+          scripts/config --disable LOCALVERSION_AUTO
+
+          make LLVM=1 olddefconfig
+
+          echo "===== CPU CONFIG ====="
+          grep -E '^CONFIG_(GENERIC_CPU|MZEN|MZEN2|MZEN3|MZEN4|MNATIVE_AMD|MNATIVE_INTEL|X86_NATIVE_CPU)=' .config || true
+
+          echo "===== SCHEDULER ====="
+          grep -E '^CONFIG_(SCHED_|PREEMPT|HZ_)' .config | head -100 || true
+
+          echo "===== AMD PSTATE ====="
+          grep -E '^CONFIG_X86_AMD_PSTATE' .config || true
+
+          echo "===== LTO / OPT ====="
+          grep -E '^CONFIG_(LTO_CLANG|LTO_CLANG_FULL|LTO_CLANG_THIN|CC_OPTIMIZE_FOR_PERFORMANCE)' .config || true
+
+          echo "===== VERIFY ====="
+          grep -q '^CONFIG_MZEN2=y' .config || grep -q '^CONFIG_GENERIC_CPU=y' .config \
+            || { echo "No valid CPU target selected"; exit 1; }
+          grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo "LTO_CLANG_THIN not enabled"; exit 1; }
+
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          KBUILD_BUILD_USER: github-actions
+          KBUILD_BUILD_HOST: github-actions
+        run: |
+          make -j"$(nproc)" \
+            LLVM=1 \
+            KCFLAGS="${CPU_CFLAGS} -Wno-default-const-init-var-unsafe"
+
+      - name: Prepare kernel artifacts
+        working-directory: kernel
+        run: |
+          KVER="$(make -s LLVM=1 kernelrelease)"
+          echo "Kernel release: ${KVER}"
+
+          mkdir -p pkgroot/boot
+
+          cp arch/x86/boot/bzImage "pkgroot/boot/vmlinuz-${KVER}"
+          cp System.map            "pkgroot/boot/System.map-${KVER}"
+          cp .config               "pkgroot/boot/config-${KVER}"
+
+          # Install modules under /usr/lib/modules (Arch and merged-usr Debian/Ubuntu)
+          make LLVM=1 \
+            INSTALL_MOD_PATH="$PWD/pkgroot/usr" \
+            INSTALL_MOD_STRIP=1 \
+            modules_install
+
+          rm -f \
+            "pkgroot/usr/lib/modules/${KVER}/build" \
+            "pkgroot/usr/lib/modules/${KVER}/source"
+
+          depmod -b "$PWD/pkgroot/usr" "${KVER}"
+
+          echo "${KVER}" > pkgroot/kernelrelease
+
+          tar --zstd -cf kernel-root.tar.zst -C pkgroot .
+
+          ls -lh kernel-root.tar.zst
+          du -sh pkgroot
+
+      - name: Upload kernel build
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build
+          path: kernel/kernel-root.tar.zst
+          compression-level: 0
+
+  arch:
+    name: Arch Linux package
+    needs:
+      - build
+    runs-on: ubuntu-24.04
+
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install packaging dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel \
+            zstd \
+            tar
+
+      - name: Download kernel build
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-build
+          path: build
+
+      - name: Create Arch package
+        run: |
+          mkdir -p package
+          tar --zstd -xf build/kernel-root.tar.zst -C package
+
+          KVER="$(cat package/kernelrelease)"
+          rm -f package/kernelrelease
+
+          # Arch layout: vmlinuz lives in /usr/lib/modules/<version>/
+          install -Dm644 "package/boot/vmlinuz-${KVER}" \
+            "package/usr/lib/modules/${KVER}/vmlinuz"
+          echo "linux-cachyos-zen2-eevdf" > "package/usr/lib/modules/${KVER}/pkgbase"
+          rm -rf package/boot
+
+          PKGVER="${KVER//-/_}"
+          PKGVER="${PKGVER//+/_}"
+
+          mkdir -p archpkg
+          cp -a package archpkg/pkgroot
+
+          cat > archpkg/PKGBUILD <<EOF
+          pkgname=linux-cachyos-zen2-eevdf
+          pkgver=${PKGVER}
+          pkgrel=1
+          pkgdesc="CachyOS Linux kernel with EEVDF for AMD Zen 2"
+          arch=('x86_64')
+          license=('GPL-2.0-only')
+          options=('!strip' '!debug')
+
+          package() {
+              cp -a "\${startdir}/pkgroot/." "\${pkgdir}/"
+          }
+          EOF
+
+          useradd -m builder
+          chown -R builder:builder archpkg
+
+          su builder -c "cd archpkg && makepkg --skipinteg --nocheck --nodeps"
+
+          mkdir -p artifacts
+          find archpkg -maxdepth 1 -type f -name '*.pkg.tar.zst' -exec cp {} artifacts/ \;
+
+          ls -lah artifacts
+
+      - name: Upload Arch package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-arch-zen2-eevdf
+          path: artifacts/*.pkg.tar.zst
+
+  deb:
+    name: Ubuntu/Debian package
+    needs:
+      - build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dpkg-dev \
+            zstd \
+            tar
+
+      - name: Download kernel build
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-build
+          path: build
+
+      - name: Create Debian package
+        run: |
+          mkdir -p package
+          tar --zstd -xf build/kernel-root.tar.zst -C package
+
+          KVER="$(cat package/kernelrelease)"
+          rm -f package/kernelrelease
+
+          mkdir -p package/DEBIAN
+
+          cat > package/DEBIAN/control <<EOF
+          Package: linux-cachyos-zen2-eevdf
+          Version: ${KVER}
+          Section: kernel
+          Priority: optional
+          Architecture: amd64
+          Maintainer: GitHub Actions <noreply@github.com>
+          Description: CachyOS Linux kernel with EEVDF for AMD Zen 2
+          EOF
+
+          cat > package/DEBIAN/postinst <<EOF
+          #!/bin/sh
+          set -e
+
+          depmod "${KVER}" || true
+
+          if command -v update-initramfs >/dev/null 2>&1; then
+              update-initramfs -c -k "${KVER}" || true
+          fi
+
+          if command -v update-grub >/dev/null 2>&1; then
+              update-grub || true
+          fi
+
+          exit 0
+          EOF
+
+          cat > package/DEBIAN/prerm <<EOF
+          #!/bin/sh
+          exit 0
+          EOF
+
+          cat > package/DEBIAN/postrm <<EOF
+          #!/bin/sh
+          set -e
+
+          rm -f "/boot/initrd.img-${KVER}" || true
+          depmod -a || true
+
+          if command -v update-grub >/dev/null 2>&1; then
+              update-grub || true
+          fi
+
+          exit 0
+          EOF
+
+          chmod 0755 \
+            package/DEBIAN/postinst \
+            package/DEBIAN/prerm \
+            package/DEBIAN/postrm
+
+          mkdir -p artifacts
+
+          dpkg-deb \
+            --build \
+            --root-owner-group \
+            package \
+            "artifacts/linux-cachyos-zen2-eevdf_${KVER}_amd64.deb"
+
+          dpkg-deb --info \
+            "artifacts/linux-cachyos-zen2-eevdf_${KVER}_amd64.deb"
+
+          ls -lah artifacts
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-deb-zen2-eevdf
+          path: artifacts/*.deb
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/linux-')
+    needs:
+      - arch
+      - deb
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download Arch artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-arch-zen2-eevdf
+          path: release
+
+      - name: Download Debian artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-deb-zen2-eevdf
+          path: release
+
+      - name: List release files
+        run: |
+          find release -type f -print
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/*.pkg.tar.zst
+            release/*.deb
