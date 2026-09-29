@@ -2,18 +2,23 @@ name: Build CachyOS Zen2 EEVDF Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: "CachyOS/linux branch or tag to build (e.g. cachyos-7.2.8-1)"
+        required: false
+        default: ""
   push:
     branches:
       - master
     tags:
-      - "linux-*"
+      - "release-*"
 
 permissions:
   contents: write
 
 env:
   KERNEL_REPO: https://github.com/CachyOS/linux.git
-  KERNEL_REF: master
+  KERNEL_REF_DEFAULT: master
 
   CONFIG_URL: https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos-eevdf/config
 
@@ -31,6 +36,28 @@ jobs:
       LIBCLANG_PATH: /opt/llvm/lib
 
     steps:
+      - name: Resolve kernel ref
+        env:
+          INPUT_REF: ${{ inputs.kernel_ref }}
+        run: |
+          # Tag "linux-<cachyos tag>" builds CachyOS/linux at "<cachyos tag>",
+          # e.g. tag linux-cachyos-7.2.8-1 -> CachyOS/linux tag cachyos-7.2.8-1
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            REF="${GITHUB_REF_NAME#linux-}"
+          elif [ -n "${INPUT_REF}" ]; then
+            REF="${INPUT_REF}"
+          else
+            REF="${KERNEL_REF_DEFAULT}"
+          fi
+
+          if ! printf '%s' "${REF}" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "Invalid kernel ref: ${REF}"
+            exit 1
+          fi
+
+          echo "Building CachyOS/linux ref: ${REF}"
+          echo "KERNEL_REF=${REF}" >> "$GITHUB_ENV"
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -112,6 +139,8 @@ jobs:
             "${KERNEL_REPO}" \
             kernel
 
+          git -C kernel log -1 --oneline
+
       - name: Fetch CachyOS EEVDF config
         working-directory: kernel
         run: |
@@ -172,6 +201,7 @@ jobs:
           echo "===== VERIFY ====="
           grep -q '^CONFIG_MZEN2=y' .config || grep -q '^CONFIG_GENERIC_CPU=y' .config \
             || { echo "No valid CPU target selected"; exit 1; }
+          grep -q '^CONFIG_CC_IS_CLANG=y' .config || { echo "Kernel is not configured for clang"; exit 1; }
           grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo "LTO_CLANG_THIN not enabled"; exit 1; }
 
       - name: Build kernel
@@ -399,7 +429,7 @@ jobs:
 
   release:
     name: GitHub Release
-    if: startsWith(github.ref, 'refs/tags/linux-')
+    if: startsWith(github.ref, 'refs/tags/release-')
     needs:
       - arch
       - deb
