@@ -245,11 +245,81 @@ jobs:
           ls -lh kernel-root.tar.zst
           du -sh pkgroot
 
+      - name: Prepare kernel headers
+        working-directory: kernel
+        run: |
+          KVER="$(make -s LLVM=1 kernelrelease)"
+          hdr="$PWD/hdrroot"
+          builddir="${hdr}/usr/lib/modules/${KVER}/build"
+
+          install -Dt "${builddir}" -m644 .config Makefile Module.symvers System.map
+          install -Dt "${builddir}/kernel" -m644 kernel/Makefile
+          install -Dt "${builddir}/arch/x86" -m644 arch/x86/Makefile
+
+          cp -t "${builddir}" -a scripts
+          cp -t "${builddir}" -a include
+          cp -t "${builddir}/arch/x86" -a arch/x86/include
+
+          if [ -f arch/x86/kernel/asm-offsets.s ]; then
+            install -Dt "${builddir}/arch/x86/kernel" -m644 arch/x86/kernel/asm-offsets.s
+          fi
+
+          # Needed to build external modules when objtool / BTF are enabled
+          if [ -f tools/objtool/objtool ]; then
+            install -Dt "${builddir}/tools/objtool" tools/objtool/objtool
+          fi
+          if [ -f tools/bpf/resolve_btfids/resolve_btfids ]; then
+            install -Dt "${builddir}/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+          fi
+
+          # Private headers that some out-of-tree modules include
+          for f in \
+            drivers/md/*.h \
+            net/mac80211/*.h \
+            drivers/media/i2c/msp3400-driver.h \
+            drivers/media/usb/dvb-usb/*.h \
+            drivers/media/dvb-frontends/*.h \
+            drivers/media/tuners/*.h \
+            drivers/iio/common/hid-sensors/*.h
+          do
+            if [ -f "$f" ]; then
+              install -Dm644 "$f" "${builddir}/${f}"
+            fi
+          done
+
+          # Kconfig files
+          find . -path ./hdrroot -prune -o -name 'Kconfig*' -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                install -Dm644 "$f" "${builddir}/${f}"
+              done
+
+          # Keep only x86
+          for d in "${builddir}"/arch/*/; do
+            case "$d" in
+              */x86/) ;;
+              *) rm -rf "$d" ;;
+            esac
+          done
+
+          # Cleanup
+          find -L "${builddir}" -type l -delete
+          find "${builddir}" -type f -name '*.o' -delete
+
+          mkdir -p "${hdr}/usr/src"
+          ln -sr "${builddir}" "${hdr}/usr/src/linux-headers-${KVER}"
+
+          tar --zstd -cf headers-root.tar.zst -C "${hdr}" .
+
+          ls -lh headers-root.tar.zst
+          du -sh "${hdr}"
+
       - name: Upload kernel build
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build
-          path: kernel/kernel-root.tar.zst
+          path: |
+            kernel/kernel-root.tar.zst
+            kernel/headers-root.tar.zst
           compression-level: 0
 
   arch:
@@ -293,20 +363,28 @@ jobs:
           PKGVER="${KVER//-/_}"
           PKGVER="${PKGVER//+/_}"
 
-          mkdir -p archpkg
+          mkdir -p archpkg/pkgroot-headers
           cp -a package archpkg/pkgroot
+          tar --zstd -xf build/headers-root.tar.zst -C archpkg/pkgroot-headers
 
           cat > archpkg/PKGBUILD <<EOF
-          pkgname=linux-cachyos-zen2-eevdf
+          pkgbase=linux-cachyos-zen2-eevdf
+          pkgname=('linux-cachyos-zen2-eevdf' 'linux-cachyos-zen2-eevdf-headers')
           pkgver=${PKGVER}
           pkgrel=1
-          pkgdesc="CachyOS Linux kernel with EEVDF for AMD Zen 2"
           arch=('x86_64')
           license=('GPL-2.0-only')
           options=('!strip' '!debug')
 
-          package() {
+          package_linux-cachyos-zen2-eevdf() {
+              pkgdesc="CachyOS Linux kernel with EEVDF for AMD Zen 2"
               cp -a "\${startdir}/pkgroot/." "\${pkgdir}/"
+          }
+
+          package_linux-cachyos-zen2-eevdf-headers() {
+              pkgdesc="Headers and scripts for building modules for the CachyOS Zen 2 EEVDF kernel"
+              depends=('linux-cachyos-zen2-eevdf')
+              cp -a "\${startdir}/pkgroot-headers/." "\${pkgdir}/"
           }
           EOF
 
@@ -418,6 +496,31 @@ jobs:
 
           dpkg-deb --info \
             "artifacts/linux-cachyos-zen2-eevdf_${KVER}_amd64.deb"
+
+          # Headers package
+          mkdir -p package-headers
+          tar --zstd -xf build/headers-root.tar.zst -C package-headers
+          mkdir -p package-headers/DEBIAN
+
+          cat > package-headers/DEBIAN/control <<EOF
+          Package: linux-cachyos-zen2-eevdf-headers
+          Version: ${KVER}
+          Section: kernel
+          Priority: optional
+          Architecture: amd64
+          Depends: linux-cachyos-zen2-eevdf
+          Maintainer: GitHub Actions <noreply@github.com>
+          Description: Headers and scripts for CachyOS Zen 2 EEVDF kernel
+          EOF
+
+          dpkg-deb \
+            --build \
+            --root-owner-group \
+            package-headers \
+            "artifacts/linux-cachyos-zen2-eevdf-headers_${KVER}_amd64.deb"
+
+          dpkg-deb --info \
+            "artifacts/linux-cachyos-zen2-eevdf-headers_${KVER}_amd64.deb"
 
           ls -lah artifacts
 
