@@ -24,16 +24,16 @@ jobs:
       - name: Install packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-gi python3-evdev dpkg-dev
+          sudo apt-get install -y python3 python3-gi python3-evdev python3-pyatspi x11-utils dpkg-dev
 
       - name: Validate Python
         run: |
-          python3 -m py_compile q704-osk/q704_osk.py
+          python3 -m py_compile q704-osk/q704_osk.py\n          python3 -c "import pyatspi; print(\"AT-SPI OK\")"
 
       - name: Build Debian package
         run: |
           set -e
-          VER="1.0.0"
+          VER="1.1.0"
           PKGROOT="$PWD/pkgroot"
 
           rm -rf "$PKGROOT" artifacts
