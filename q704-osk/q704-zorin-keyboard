@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python3 /usr/lib/q704-zorin-keyboard/q704_osk.py "$@"
