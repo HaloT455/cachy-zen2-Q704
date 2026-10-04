@@ -24,6 +24,7 @@ public class YouTubeBridgeService extends AccessibilityService {
     private static final String PLAY_STORE = "com.android.vending";
     private static final String KATNISS_PACKAGE = "com.google.android.katniss";
     private static final String LAUNCHER_PACKAGE = "com.google.android.apps.tv.launcherx";
+    private static final String FRAMEWORK_STUB_PACKAGE = "com.android.tv.frameworkpackagestubs";
     private static final int KEYCODE_VIDEO_APP_3 = 291;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -120,6 +121,21 @@ public class YouTubeBridgeService extends AccessibilityService {
             handler.postDelayed(checkPlayStoreRetryRunnable, 650);
             handler.postDelayed(checkPlayStoreRetry2Runnable, 1200);
             return;
+        }
+
+        // BRAVIA routes Assistant's fallback http://www.youtube.com intent into
+        // FrameworkPackageStubs when the Google-signed YouTube package is absent.
+        // That stub shows the "app doesn't support this package" message even though
+        // the bridge already opened the mod successfully. Dismiss only when this
+        // immediately follows a recent YouTube Assistant command.
+        if (FRAMEWORK_STUB_PACKAGE.equals(pkg)) {
+            long now = SystemClock.elapsedRealtime();
+            if (lastAssistantUtteranceMs > 0 && now - lastAssistantUtteranceMs <= 5000) {
+                Log.i(TAG, "Framework YouTube stub intercepted; dismissing unsupported-app UI");
+                performGlobalAction(GLOBAL_ACTION_BACK);
+                handler.postDelayed(this::bringModTaskToFront, 120);
+                return;
+            }
         }
 
         // Assistant sometimes sends HOME at the end of the voice interaction after
