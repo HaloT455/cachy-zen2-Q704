@@ -24,11 +24,12 @@ jobs:
       - name: Install packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-gi python3-evdev python3-pyatspi x11-utils dpkg-dev
+          sudo apt-get install -y             python3 python3-gi python3-evdev python3-pyatspi             gir1.2-gtk-3.0 x11-utils dpkg-dev
 
-      - name: Validate Python
+      - name: Validate Python and AT-SPI
         run: |
-          python3 -m py_compile q704-osk/q704_osk.py\n          python3 -c "import pyatspi; print(\"AT-SPI OK\")"
+          python3 -m py_compile q704-osk/q704_osk.py
+          python3 -c 'import pyatspi; print("AT-SPI OK")'
 
       - name: Build Debian package
         run: |
@@ -45,14 +46,31 @@ jobs:
           mkdir -p "$PKGROOT/etc/udev/rules.d"
           mkdir -p "$PKGROOT/etc/modules-load.d"
 
-          install -m 0755 q704-osk/q704_osk.py "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_osk.py"
-          install -m 0755 q704-osk/q704-zorin-keyboard "$PKGROOT/usr/bin/q704-zorin-keyboard"
-          install -m 0644 q704-osk/q704-zorin-keyboard.desktop "$PKGROOT/usr/share/applications/q704-zorin-keyboard.desktop"
-          install -m 0644 q704-osk/q704-zorin-keyboard-autostart.desktop "$PKGROOT/etc/xdg/autostart/q704-zorin-keyboard.desktop"
-          install -m 0644 q704-osk/80-q704-uinput.rules "$PKGROOT/etc/udev/rules.d/80-q704-uinput.rules"
+          install -m 0755 q704-osk/q704_osk.py             "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_osk.py"
+
+          install -m 0755 q704-osk/q704-zorin-keyboard             "$PKGROOT/usr/bin/q704-zorin-keyboard"
+
+          install -m 0644 q704-osk/q704-zorin-keyboard.desktop             "$PKGROOT/usr/share/applications/q704-zorin-keyboard.desktop"
+
+          install -m 0644 q704-osk/q704-zorin-keyboard-autostart.desktop             "$PKGROOT/etc/xdg/autostart/q704-zorin-keyboard.desktop"
+
+          install -m 0644 q704-osk/80-q704-uinput.rules             "$PKGROOT/etc/udev/rules.d/80-q704-uinput.rules"
+
           printf '%s\n' uinput > "$PKGROOT/etc/modules-load.d/q704-zorin-keyboard.conf"
 
-          printf '%s\n'             "Package: q704-zorin-keyboard"             "Version: $VER"             "Section: utils"             "Priority: optional"             "Architecture: all"             "Depends: python3, python3-gi, python3-evdev, gir1.2-gtk-3.0"             "Recommends: xwayland"             "Maintainer: HaloT455 <noreply@github.com>"             "Description: Zorin-themed touch keyboard for Fujitsu Stylistic Q704"             " Uses Linux uinput so Chrome, GTK, Qt and other applications receive"             " real keyboard events on both X11 and Wayland sessions."             > "$PKGROOT/DEBIAN/control"
+          {
+            echo "Package: q704-zorin-keyboard"
+            echo "Version: $VER"
+            echo "Section: utils"
+            echo "Priority: optional"
+            echo "Architecture: all"
+            echo "Depends: python3, python3-gi, python3-evdev, python3-pyatspi, gir1.2-gtk-3.0, x11-utils"
+            echo "Recommends: xwayland"
+            echo "Maintainer: HaloT455 <noreply@github.com>"
+            echo "Description: Zorin-themed touch keyboard for Fujitsu Stylistic Q704"
+            echo " Auto-opens on editable fields through AT-SPI, emits real keyboard"
+            echo " events through uinput, and docks to the bottom of the screen."
+          } > "$PKGROOT/DEBIAN/control"
 
           install -m 0755 q704-osk/postinst "$PKGROOT/DEBIAN/postinst"
 
@@ -60,7 +78,7 @@ jobs:
           chmod 0755 "$PKGROOT/DEBIAN/prerm"
 
           mkdir -p artifacts
-          dpkg-deb --build --root-owner-group "$PKGROOT" "artifacts/q704-zorin-keyboard_${VER}_all.deb"
+          dpkg-deb --build --root-owner-group             "$PKGROOT"             "artifacts/q704-zorin-keyboard_${VER}_all.deb"
 
           dpkg-deb --info "artifacts/q704-zorin-keyboard_${VER}_all.deb"
           dpkg-deb --contents "artifacts/q704-zorin-keyboard_${VER}_all.deb"
@@ -70,6 +88,6 @@ jobs:
       - name: Upload Q704 keyboard
         uses: actions/upload-artifact@v4
         with:
-          name: q704-zorin-keyboard-deb
+          name: q704-zorin-keyboard-v1.1-deb
           path: artifacts/*
           retention-days: 30
