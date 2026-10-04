@@ -2,6 +2,7 @@
 import os
 import signal
 import sys
+import threading
 import time
 
 import pyatspi
@@ -10,7 +11,19 @@ if len(sys.argv) != 2:
     raise SystemExit("usage: q704_focusd.py <keyboard-pid>")
 
 PARENT_PID = int(sys.argv[1])
-last_editable = None
+
+_last_visible = False
+_last_desc = ""
+_hide_misses = 0
+_lock = threading.Lock()
+
+EDITABLE_ROLES = {
+    getattr(pyatspi, "ROLE_ENTRY", -1001),
+    getattr(pyatspi, "ROLE_PASSWORD_TEXT", -1002),
+    getattr(pyatspi, "ROLE_TEXT", -1003),
+    getattr(pyatspi, "ROLE_PARAGRAPH", -1004),
+    getattr(pyatspi, "ROLE_DOCUMENT_TEXT", -1005),
+}
 
 def parent_alive():
     try:
@@ -27,29 +40,6 @@ def send(sig):
     except ProcessLookupError:
         raise SystemExit(0)
 
-def is_editable(obj):
-    if obj is None:
-        return False
-
-    try:
-        state = obj.getState()
-        if state.contains(pyatspi.STATE_EDITABLE):
-            return True
-    except Exception:
-        pass
-
-    try:
-        role = obj.getRole()
-        if role in (
-            getattr(pyatspi, "ROLE_ENTRY", -999),
-            getattr(pyatspi, "ROLE_PASSWORD_TEXT", -998),
-        ):
-            return True
-    except Exception:
-        pass
-
-    return False
-
 def describe(obj):
     try:
         role = obj.getRoleName()
@@ -59,35 +49,87 @@ def describe(obj):
         name = obj.name or ""
     except Exception:
         name = ""
-    return f"role={role} name={name!r}"
+    try:
+        app = obj.getApplication()
+        appname = app.name if app else ""
+    except Exception:
+        appname = ""
+    return f"app={appname!r} role={role} name={name!r}"
+
+def state_has(obj, state_const):
+    try:
+        return obj.getState().contains(state_const)
+    except Exception:
+        return False
+
+def is_editable(obj):
+    if obj is None:
+        return False
+
+    # Strongest signal for Chrome/Telegram/web contenteditable.
+    if state_has(obj, pyatspi.STATE_EDITABLE):
+        return True
+
+    # Native entry/password controls sometimes omit EDITABLE momentarily.
+    try:
+        role = obj.getRole()
+        if role in (
+            getattr(pyatspi, "ROLE_ENTRY", -2001),
+            getattr(pyatspi, "ROLE_PASSWORD_TEXT", -2002),
+        ):
+            return True
+
+        # Text/paragraph/document roles are accepted only when focused and
+        # selectable/sensitive. This catches chat composers and contenteditable
+        # without opening the keyboard on ordinary document text.
+        if role in EDITABLE_ROLES:
+            focused = state_has(obj, pyatspi.STATE_FOCUSED)
+            sensitive = state_has(obj, pyatspi.STATE_SENSITIVE)
+            selectable = state_has(obj, pyatspi.STATE_SELECTABLE_TEXT)
+            if focused and (sensitive or selectable):
+                return True
+    except Exception:
+        pass
+
+    return False
+
+def emit_visibility(show, obj=None, reason="event"):
+    global _last_visible, _last_desc, _hide_misses
+    with _lock:
+        if show:
+            _hide_misses = 0
+            desc = describe(obj) if obj is not None else ""
+            if not _last_visible or desc != _last_desc:
+                print(f"[Q704-FOCUS] SHOW/{reason} {desc}", flush=True)
+                send(signal.SIGUSR1)
+            _last_visible = True
+            _last_desc = desc
+        else:
+            _hide_misses += 1
+            # Debounce focus transitions (input -> popup -> input).
+            if _last_visible and _hide_misses >= 3:
+                print(f"[Q704-FOCUS] HIDE/{reason}", flush=True)
+                send(signal.SIGUSR2)
+                _last_visible = False
+                _last_desc = ""
+                _hide_misses = 0
 
 def on_focus(event):
-    global last_editable
-
     try:
         focused = bool(event.detail1)
         obj = event.source
     except Exception:
         return
 
-    editable = is_editable(obj)
-
-    if focused and editable:
-        last_editable = obj
-        print(f"[Q704-FOCUS] SHOW {describe(obj)}", flush=True)
-        send(signal.SIGUSR1)
-        return
-
-    if not focused and editable:
-        print(f"[Q704-FOCUS] HIDE {describe(obj)}", flush=True)
-        last_editable = None
-        send(signal.SIGUSR2)
+    if focused and is_editable(obj):
+        emit_visibility(True, obj, "focus")
+    elif focused:
+        emit_visibility(False, obj, "focus-other")
 
 def on_caret(event):
     obj = getattr(event, "source", None)
     if is_editable(obj):
-        print(f"[Q704-FOCUS] CARET {describe(obj)}", flush=True)
-        send(signal.SIGUSR1)
+        emit_visibility(True, obj, "caret")
 
 def on_editable(event):
     obj = getattr(event, "source", None)
@@ -97,11 +139,104 @@ def on_editable(event):
         enabled = False
 
     if enabled and is_editable(obj):
-        print(f"[Q704-FOCUS] EDITABLE {describe(obj)}", flush=True)
-        send(signal.SIGUSR1)
+        emit_visibility(True, obj, "editable")
 
-print(f"[Q704-FOCUS] helper started pid={os.getpid()} parent={PARENT_PID}", flush=True)
+def on_text_insert(event):
+    obj = getattr(event, "source", None)
+    if is_editable(obj):
+        emit_visibility(True, obj, "text")
 
+def find_focused_descendant(root, max_nodes=5000):
+    if root is None:
+        return None
+
+    stack = [root]
+    visited = 0
+
+    while stack and visited < max_nodes:
+        obj = stack.pop()
+        visited += 1
+
+        try:
+            state = obj.getState()
+            if state.contains(pyatspi.STATE_FOCUSED):
+                return obj
+
+            count = obj.childCount
+            for index in range(count - 1, -1, -1):
+                child = obj.getChildAtIndex(index)
+                if child is not None:
+                    stack.append(child)
+        except Exception:
+            continue
+
+    return None
+
+def currently_focused_object():
+    try:
+        desktop = pyatspi.Registry.getDesktop(0)
+    except Exception:
+        return None
+
+    # Prefer active windows so polling remains cheap on Chrome/Telegram.
+    for ai in range(desktop.childCount):
+        try:
+            app = desktop.getChildAtIndex(ai)
+            if app is None:
+                continue
+
+            for wi in range(app.childCount):
+                win = app.getChildAtIndex(wi)
+                if win is None:
+                    continue
+
+                try:
+                    wstate = win.getState()
+                    active = wstate.contains(pyatspi.STATE_ACTIVE)
+                    showing = wstate.contains(pyatspi.STATE_SHOWING)
+                    if not (active or showing):
+                        continue
+                except Exception:
+                    pass
+
+                focused = find_focused_descendant(win)
+                if focused is not None:
+                    return focused
+        except Exception:
+            continue
+
+    return None
+
+def polling_loop():
+    print("[Q704-FOCUS] polling started 200ms", flush=True)
+
+    while parent_alive():
+        try:
+            obj = currently_focused_object()
+            if obj is not None and is_editable(obj):
+                emit_visibility(True, obj, "poll")
+            else:
+                emit_visibility(False, obj, "poll")
+        except Exception as ex:
+            print(f"[Q704-FOCUS] polling error: {ex}", flush=True)
+
+        time.sleep(0.20)
+
+    os._exit(0)
+
+print(
+    f"[Q704-FOCUS] helper started pid={os.getpid()} parent={PARENT_PID}",
+    flush=True,
+)
+
+# Polling is the fallback for apps that do not emit reliable focus events.
+threading.Thread(
+    target=polling_loop,
+    name="q704-focus-poll",
+    daemon=True,
+).start()
+
+# Event path: instant response when an app exposes proper AT-SPI events.
 pyatspi.Registry.registerEventListener(
     on_focus,
     "object:state-changed:focused",
@@ -113,6 +248,10 @@ pyatspi.Registry.registerEventListener(
 pyatspi.Registry.registerEventListener(
     on_editable,
     "object:state-changed:editable",
+)
+pyatspi.Registry.registerEventListener(
+    on_text_insert,
+    "object:text-changed:insert",
 )
 
 try:
