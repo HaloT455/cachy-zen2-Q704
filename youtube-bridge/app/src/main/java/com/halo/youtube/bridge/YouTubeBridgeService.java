@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 
 public class YouTubeBridgeService extends AccessibilityService {
+    private static final String TAG = "YouTubeBridge";
     private static final String MOD_PACKAGE = "com.google.android.youtubx.tv";
     private static final String MOD_ACTIVITY = "com.google.android.apps.youtube.tv.activity.ShellActivity";
     private static final String OFFICIAL_PACKAGE = "com.google.android.youtube.tv";
@@ -40,8 +42,10 @@ public class YouTubeBridgeService extends AccessibilityService {
             long now = SystemClock.elapsedRealtime();
             String query = getRecentAssistantQuery(now);
             if (query.isEmpty()) {
+                Log.i(TAG, "Direct Assistant launch -> mod home");
                 launchModHome();
             } else {
+                Log.i(TAG, "Direct Assistant launch query=" + query);
                 launchModSearch(query);
             }
         }
@@ -86,12 +90,24 @@ public class YouTubeBridgeService extends AccessibilityService {
             return;
         }
 
-        // When the official YouTube package is absent for user 0, Assistant can
-        // route to the Play Store. Detect the YouTube page and preserve the same
-        // spoken query instead of merely opening the mod home screen.
+        // When Assistant routes to Play Store because official YouTube is absent,
+        // immediately steal foreground back if this follows a recent YouTube voice
+        // command. This avoids depending on Play Store's accessibility tree loading.
         if (PLAY_STORE.equals(pkg)) {
+            long now = SystemClock.elapsedRealtime();
+            String query = getRecentAssistantQuery(now);
+
+            if (!query.isEmpty()) {
+                Log.i(TAG, "Play Store intercepted, redirect query=" + query);
+                launchModSearch(query);
+                return;
+            }
+
+            // Fallback for cases where Katniss transcript arrives slightly later.
             handler.removeCallbacks(checkPlayStoreRunnable);
             handler.postDelayed(checkPlayStoreRunnable, 250);
+            handler.postDelayed(checkPlayStoreRetryRunnable, 650);
+            handler.postDelayed(checkPlayStoreRetry2Runnable, 1200);
         }
     }
 
@@ -115,8 +131,9 @@ public class YouTubeBridgeService extends AccessibilityService {
             // Direct fallback for TVs where Assistant reports "no supporting app"
             // when the Google-signed YouTube package is absent for user 0.
             // Debounce transcription updates; the last (final/longest) phrase wins.
+            Log.i(TAG, "Katniss utterance=" + lastAssistantUtterance);
             handler.removeCallbacks(directAssistantLaunchRunnable);
-            handler.postDelayed(directAssistantLaunchRunnable, 700);
+            handler.postDelayed(directAssistantLaunchRunnable, 250);
         }
     }
 
@@ -273,18 +290,39 @@ public class YouTubeBridgeService extends AccessibilityService {
     private final Runnable checkPlayStoreRunnable = new Runnable() {
         @Override
         public void run() {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
-            if (root != null && treeContainsYouTube(root)) {
-                long now = SystemClock.elapsedRealtime();
-                String query = getRecentAssistantQuery(now);
-                if (query.isEmpty()) {
-                    launchModHome();
-                } else {
-                    launchModSearch(query);
-                }
-            }
+            redirectFromPlayStoreIfNeeded();
         }
     };
+
+    private final Runnable checkPlayStoreRetryRunnable = new Runnable() {
+        @Override
+        public void run() {
+            redirectFromPlayStoreIfNeeded();
+        }
+    };
+
+    private final Runnable checkPlayStoreRetry2Runnable = new Runnable() {
+        @Override
+        public void run() {
+            redirectFromPlayStoreIfNeeded();
+        }
+    };
+
+    private void redirectFromPlayStoreIfNeeded() {
+        long now = SystemClock.elapsedRealtime();
+        String query = getRecentAssistantQuery(now);
+        if (!query.isEmpty()) {
+            Log.i(TAG, "Delayed Play Store redirect query=" + query);
+            launchModSearch(query);
+            return;
+        }
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null && treeContainsYouTube(root)) {
+            Log.i(TAG, "Play Store YouTube page detected -> mod home");
+            launchModHome();
+        }
+    }
 
     private boolean treeContainsYouTube(AccessibilityNodeInfo root) {
         ArrayDeque<AccessibilityNodeInfo> q = new ArrayDeque<>();
