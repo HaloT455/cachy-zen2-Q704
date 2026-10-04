@@ -24,7 +24,10 @@ jobs:
       - name: Install packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y             python3 python3-gi python3-evdev python3-pyatspi             gir1.2-gtk-3.0 x11-utils dpkg-dev
+          sudo apt-get install -y \
+            python3 python3-gi python3-evdev python3-pyatspi \
+            gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
+            x11-utils dpkg-dev
 
       - name: Validate Python and AT-SPI
         run: |
