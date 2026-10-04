@@ -23,12 +23,14 @@ public class YouTubeBridgeService extends AccessibilityService {
     private static final String OFFICIAL_PACKAGE = "com.google.android.youtube.tv";
     private static final String PLAY_STORE = "com.android.vending";
     private static final String KATNISS_PACKAGE = "com.google.android.katniss";
+    private static final String LAUNCHER_PACKAGE = "com.google.android.apps.tv.launcherx";
     private static final int KEYCODE_VIDEO_APP_3 = 291;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private long lastLaunchMs = 0L;
     private long lastOfficialRedirectMs = 0L;
+    private long lastAssistantRedirectMs = 0L;
 
     private String lastAssistantUtterance = "";
     private long lastAssistantUtteranceMs = 0L;
@@ -41,6 +43,7 @@ public class YouTubeBridgeService extends AccessibilityService {
         public void run() {
             long now = SystemClock.elapsedRealtime();
             String query = getRecentAssistantQuery(now);
+            lastAssistantRedirectMs = now;
             if (query.isEmpty()) {
                 Log.i(TAG, "Direct Assistant launch -> mod home");
                 launchModHome();
@@ -98,8 +101,16 @@ public class YouTubeBridgeService extends AccessibilityService {
             String query = getRecentAssistantQuery(now);
 
             if (!query.isEmpty()) {
-                Log.i(TAG, "Play Store intercepted, redirect query=" + query);
-                launchModSearch(query);
+                lastAssistantRedirectMs = now;
+                Log.i(TAG, "Play Store intercepted; dismissing it, query=" + query);
+
+                // Remove the Play Store task from the visible stack first. On BRAVIA,
+                // Assistant may open Play Store even though the mod is already launched.
+                performGlobalAction(GLOBAL_ACTION_BACK);
+
+                final String q = query;
+                handler.postDelayed(() -> launchModSearch(q), 140);
+                handler.postDelayed(this::bringModTaskToFront, 900);
                 return;
             }
 
@@ -108,6 +119,20 @@ public class YouTubeBridgeService extends AccessibilityService {
             handler.postDelayed(checkPlayStoreRunnable, 250);
             handler.postDelayed(checkPlayStoreRetryRunnable, 650);
             handler.postDelayed(checkPlayStoreRetry2Runnable, 1200);
+            return;
+        }
+
+        // Assistant sometimes sends HOME at the end of the voice interaction after
+        // the mod has already started. During a short grace window, immediately
+        // restore the existing YouTube mod task without re-dispatching the search.
+        if (LAUNCHER_PACKAGE.equals(pkg)) {
+            long now = SystemClock.elapsedRealtime();
+            if (lastAssistantRedirectMs > 0
+                    && now - lastAssistantRedirectMs >= 400
+                    && now - lastAssistantRedirectMs <= 6500) {
+                Log.i(TAG, "Launcher appeared after Assistant redirect; restoring mod task");
+                handler.postDelayed(this::bringModTaskToFront, 180);
+            }
         }
     }
 
@@ -266,6 +291,21 @@ public class YouTubeBridgeService extends AccessibilityService {
         launchModHomeFallback();
     }
 
+    private void bringModTaskToFront() {
+        try {
+            Intent intent = getPackageManager().getLaunchIntentForPackage(MOD_PACKAGE);
+            if (intent == null) return;
+
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(intent);
+            Log.i(TAG, "Brought existing mod task to foreground");
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to bring mod task to foreground", t);
+        }
+    }
+
     private void launchModHomeFallback() {
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
@@ -312,8 +352,12 @@ public class YouTubeBridgeService extends AccessibilityService {
         long now = SystemClock.elapsedRealtime();
         String query = getRecentAssistantQuery(now);
         if (!query.isEmpty()) {
+            lastAssistantRedirectMs = now;
             Log.i(TAG, "Delayed Play Store redirect query=" + query);
-            launchModSearch(query);
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            final String q = query;
+            handler.postDelayed(() -> launchModSearch(q), 140);
+            handler.postDelayed(this::bringModTaskToFront, 900);
             return;
         }
 
