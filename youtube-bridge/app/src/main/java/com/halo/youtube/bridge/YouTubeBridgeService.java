@@ -222,12 +222,7 @@ public class YouTubeBridgeService extends AccessibilityService {
         // reviewing Assistant's video results, then selecting one.
         String anySpoken = bestTextFromEvent(event, false);
         if (isUsefulSpokenQuery(anySpoken)) {
-            String cleaned = sanitizeQuery(anySpoken);
-            if (!cleaned.isEmpty() && !isGenericUiLabel(cleaned)) {
-                lastAssistantAnyUtterance = anySpoken.trim();
-                lastAssistantAnyUtteranceMs = now;
-                Log.i(TAG, "Katniss any utterance=" + lastAssistantAnyUtterance);
-            }
+            rememberGenericVoiceCandidate(anySpoken, now);
         }
 
         String spoken = bestTextFromEvent(event, true);
@@ -309,6 +304,40 @@ public class YouTubeBridgeService extends AccessibilityService {
         return !isGenericUiLabel(lower)
                 && !(lower.equals("mở")
                 || lower.equals("phát"));
+    }
+
+    private void rememberGenericVoiceCandidate(String raw, long now) {
+        String candidate = raw == null ? "" : raw.trim();
+        String cleaned = sanitizeQuery(candidate);
+        if (cleaned.isEmpty() || isGenericUiLabel(cleaned)) return;
+
+        // Start a new voice window after a quiet gap.
+        if (lastAssistantAnyUtterance.isEmpty()
+                || now - lastAssistantAnyUtteranceMs > 4500) {
+            lastAssistantAnyUtterance = candidate;
+            lastAssistantAnyUtteranceMs = now;
+            Log.i(TAG, "Katniss generic voice start=" + lastAssistantAnyUtterance);
+            return;
+        }
+
+        // During recognition only accept a natural extension/contraction of the
+        // same phrase. This lets "karaoke" -> "karaoke chân" -> "karaoke chân ái"
+        // evolve, while result titles/section labels cannot overwrite the query.
+        String oldNorm = sanitizeQuery(lastAssistantAnyUtterance)
+                .toLowerCase(Locale.ROOT);
+        String newNorm = cleaned.toLowerCase(Locale.ROOT);
+
+        boolean samePhraseEvolution = newNorm.startsWith(oldNorm)
+                || oldNorm.startsWith(newNorm)
+                || newNorm.contains(oldNorm);
+
+        if (samePhraseEvolution) {
+            if (newNorm.length() >= oldNorm.length()) {
+                lastAssistantAnyUtterance = candidate;
+            }
+            lastAssistantAnyUtteranceMs = now;
+            Log.i(TAG, "Katniss generic voice update=" + lastAssistantAnyUtterance);
+        }
     }
 
     private boolean isGenericUiLabel(String value) {
