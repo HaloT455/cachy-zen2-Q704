@@ -464,9 +464,9 @@ class KeyboardApp:
             try:
                 proc = subprocess.Popen(
                     [
-                        "dbus-monitor",
+                        "/usr/bin/dbus-monitor",
                         "--session",
-                        "interface='org.fcitx.Fcitx.InputContext1'",
+                        "type='method_call',interface='org.fcitx.Fcitx.InputContext1'",
                     ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -474,13 +474,16 @@ class KeyboardApp:
                     bufsize=1,
                 )
                 self.fcitx_monitor = proc
+                print("[Q704] Fcitx5 DBus monitor started", flush=True)
 
                 for raw in proc.stdout:
                     line = raw.strip()
                     if "member=FocusIn" in line:
+                        print("[Q704] FCITX FocusIn", flush=True)
                         self.fcitx_focus = True
                         GLib.idle_add(self.show_keyboard)
                     elif "member=FocusOut" in line or "member=NotifyFocusOut" in line:
+                        print("[Q704] FCITX FocusOut", flush=True)
                         self.fcitx_focus = False
                         GLib.timeout_add(260, self.hide_after_fcitx_focusout)
                     elif "member=SetCursorRect" in line and not self.keyboard.get_visible():
@@ -491,7 +494,8 @@ class KeyboardApp:
                         GLib.idle_add(self.show_keyboard)
 
                 proc.wait(timeout=1)
-            except Exception:
+            except Exception as ex:
+                print(f"[Q704] Fcitx monitor error: {ex}", flush=True)
                 time.sleep(1.0)
 
     def hide_after_fcitx_focusout(self):
