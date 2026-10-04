@@ -1,0 +1,164 @@
+name: Build Q704 acpi_call module
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/acpi-call-q704.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  KVER: "7.2.8-cachyos-q704-haswell-eevdf+"
+  LLVM_VERSION: "23.1.2"
+  LLVM_DIR: "/opt/llvm"
+  HEADERS_ARTIFACT_ID: "11302310493"
+
+jobs:
+  build:
+    name: Build acpi_call.ko for Q704
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl unzip xz-utils zstd dpkg-dev kmod make bc bison flex \
+            libelf-dev libssl-dev dwarves
+
+      - name: Install exact LLVM used by Q704 kernel
+        run: |
+          curl -fL \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz" \
+            -o /tmp/llvm.tar.xz
+
+          sudo mkdir -p "${LLVM_DIR}"
+          sudo chown "$(id -u):$(id -g)" "${LLVM_DIR}"
+          tar -xJf /tmp/llvm.tar.xz --strip-components=1 -C "${LLVM_DIR}"
+
+          echo "${LLVM_DIR}/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=${LLVM_DIR}/lib" >> "$GITHUB_ENV"
+
+          export PATH="${LLVM_DIR}/bin:$PATH"
+          export LD_LIBRARY_PATH="${LLVM_DIR}/lib"
+
+          clang --version
+          ld.lld --version
+
+      - name: Download Q704 kernel headers artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HEADERS_ARTIFACT_ID}/zip" \
+            -o /tmp/q704-kernel-root.zip
+
+          mkdir -p /tmp/q704-artifact
+          unzip -q /tmp/q704-kernel-root.zip -d /tmp/q704-artifact
+
+          echo "===== ARTIFACT FILES ====="
+          find /tmp/q704-artifact -maxdepth 2 -type f -printf '%p %k KB\n'
+
+          HDR_TAR="$(find /tmp/q704-artifact -type f -name 'headers-root.tar.zst' | head -1)"
+          test -n "${HDR_TAR}"
+
+          mkdir -p /tmp/q704-headers
+          tar --zstd -xf "${HDR_TAR}" -C /tmp/q704-headers
+
+          BUILD="/tmp/q704-headers/usr/lib/modules/${KVER}/build"
+          test -d "${BUILD}"
+          test -f "${BUILD}/.config"
+          test -f "${BUILD}/Module.symvers"
+
+          echo "KBUILD_DIR=${BUILD}" >> "$GITHUB_ENV"
+
+          echo "===== HEADER CHECK ====="
+          ls -lh "${BUILD}/.config" "${BUILD}/Module.symvers" "${BUILD}/Makefile"
+          grep -E '^CONFIG_(CC_IS_CLANG|LTO_CLANG_THIN|MODVERSIONS)=' "${BUILD}/.config" || true
+
+      - name: Get Ubuntu acpi-call DKMS source
+        run: |
+          mkdir -p /tmp/acpi-pkg /tmp/acpi-src
+          cd /tmp/acpi-pkg
+
+          apt-get download acpi-call-dkms
+          DEB="$(find . -maxdepth 1 -type f -name 'acpi-call-dkms_*.deb' | head -1)"
+          test -n "${DEB}"
+
+          dpkg-deb -x "${DEB}" /tmp/acpi-src
+
+          SRC="$(find /tmp/acpi-src/usr/src -maxdepth 1 -type d -name 'acpi-call-*' | head -1)"
+          test -n "${SRC}"
+
+          cp -a "${SRC}" /tmp/acpi-call
+          echo "ACPI_SRC=/tmp/acpi-call" >> "$GITHUB_ENV"
+
+          echo "===== ACPI CALL SOURCE ====="
+          find /tmp/acpi-call -maxdepth 2 -type f -printf '%p\n' | sort
+
+      - name: Build acpi_call.ko with LLVM 23.1.2
+        run: |
+          export PATH="${LLVM_DIR}/bin:$PATH"
+          export LD_LIBRARY_PATH="${LLVM_DIR}/lib"
+
+          echo "===== COMPILER ====="
+          clang --version
+
+          echo "===== BUILD ====="
+          make -C "${KBUILD_DIR}" \
+            M="${ACPI_SRC}" \
+            LLVM=1 \
+            clean
+
+          make -C "${KBUILD_DIR}" \
+            M="${ACPI_SRC}" \
+            LLVM=1 \
+            modules \
+            V=1
+
+          test -f "${ACPI_SRC}/acpi_call.ko"
+
+          echo "===== MODULE INFO ====="
+          ls -lh "${ACPI_SRC}/acpi_call.ko"
+          modinfo "${ACPI_SRC}/acpi_call.ko"
+
+          echo "===== VERMAGIC ====="
+          modinfo -F vermagic "${ACPI_SRC}/acpi_call.ko" | tee /tmp/vermagic.txt
+          grep -q "${KVER}" /tmp/vermagic.txt
+
+      - name: Package module
+        run: |
+          mkdir -p artifact
+          cp "${ACPI_SRC}/acpi_call.ko" artifact/
+          cp "${ACPI_SRC}/Module.symvers" artifact/acpi-call-Module.symvers 2>/dev/null || true
+
+          cat > artifact/INSTALL-Q704.txt <<EOF
+          Q704 acpi_call module
+          Target kernel: ${KVER}
+          Built with LLVM ${LLVM_VERSION}
+
+          Install/test:
+            sudo mkdir -p /lib/modules/$(uname -r)/extra
+            sudo cp acpi_call.ko /lib/modules/$(uname -r)/extra/
+            sudo depmod -a
+            sudo modprobe acpi_call
+            ls -l /proc/acpi/call
+          EOF
+
+          sha256sum artifact/acpi_call.ko > artifact/SHA256SUMS
+          ls -lah artifact
+
+      - name: Upload Q704 acpi_call module
+        uses: actions/upload-artifact@v4
+        with:
+          name: q704-acpi-call-7.2.8
+          path: artifact/*
+          retention-days: 30
