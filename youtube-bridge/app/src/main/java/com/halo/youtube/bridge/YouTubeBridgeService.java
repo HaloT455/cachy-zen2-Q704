@@ -73,7 +73,9 @@ public class YouTubeBridgeService extends AccessibilityService {
             return;
         }
 
-        // Fallback for the old "install YouTube" behavior.
+        // When the official YouTube package is absent for user 0, Assistant can
+        // route to the Play Store. Detect the YouTube page and preserve the same
+        // spoken query instead of merely opening the mod home screen.
         if (PLAY_STORE.equals(pkg)) {
             handler.removeCallbacks(checkPlayStoreRunnable);
             handler.postDelayed(checkPlayStoreRunnable, 250);
@@ -254,7 +256,13 @@ public class YouTubeBridgeService extends AccessibilityService {
         public void run() {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root != null && treeContainsYouTube(root)) {
-                launchModHome();
+                long now = SystemClock.elapsedRealtime();
+                String query = getRecentAssistantQuery(now);
+                if (query.isEmpty()) {
+                    launchModHome();
+                } else {
+                    launchModSearch(query);
+                }
             }
         }
     };
