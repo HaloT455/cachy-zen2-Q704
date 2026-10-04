@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 import os
-import sys
 import subprocess
 from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gtk, Gdk, GLib
+try:
+    gi.require_version("GdkX11", "3.0")
+    from gi.repository import GdkX11
+except Exception:
+    GdkX11 = None
 
+from gi.repository import Gtk, Gdk, GLib
 from evdev import UInput, ecodes as e
+
+try:
+    import pyatspi
+except Exception:
+    pyatspi = None
 
 APP_NAME = "Q704 Zorin Keyboard"
 
@@ -27,8 +36,7 @@ KEYS = {
     "c": e.KEY_C, "v": e.KEY_V, "b": e.KEY_B, "n": e.KEY_N, "m": e.KEY_M,
     ",": e.KEY_COMMA, ".": e.KEY_DOT, "/": e.KEY_SLASH, "Ctrl": e.KEY_LEFTCTRL,
     "Alt": e.KEY_LEFTALT, "Space": e.KEY_SPACE, "Left": e.KEY_LEFT,
-    "Right": e.KEY_RIGHT, "Up": e.KEY_UP, "Down": e.KEY_DOWN,
-    "Del": e.KEY_DELETE,
+    "Right": e.KEY_RIGHT, "Up": e.KEY_UP, "Down": e.KEY_DOWN, "Del": e.KEY_DELETE,
 }
 
 SHIFT_LABELS = {
@@ -55,18 +63,23 @@ ROWS = [
      ("Del","Del",1.2), ("Ẩn","Hide",1.2)]
 ]
 
+EDITABLE_ROLES = set()
+if pyatspi:
+    for role_name in ("ROLE_ENTRY", "ROLE_PASSWORD_TEXT", "ROLE_TEXT", "ROLE_PARAGRAPH", "ROLE_DOCUMENT_TEXT"):
+        role = getattr(pyatspi, role_name, None)
+        if role is not None:
+            EDITABLE_ROLES.add(role)
+
 class InputBackend:
     def __init__(self):
         caps = {e.EV_KEY: sorted(set(KEYS.values()) | {e.KEY_LEFTMETA, e.KEY_SPACE})}
-        try:
-            self.ui = UInput(caps, name="Q704 Zorin Virtual Keyboard",
-                             vendor=0x10cf, product=0x0704, version=1)
-        except PermissionError:
-            self.ui = None
-            raise
-        except OSError:
-            self.ui = None
-            raise
+        self.ui = UInput(
+            caps,
+            name="Q704 Zorin Virtual Keyboard",
+            vendor=0x10cf,
+            product=0x0704,
+            version=2,
+        )
 
     def tap(self, code, shift=False, ctrl=False, alt=False):
         mods = []
@@ -101,16 +114,17 @@ def current_wallpaper():
                 text=True, stderr=subprocess.DEVNULL
             ).strip().strip("'")
         if uri.startswith("file://"):
-            p = uri[7:]
-            if os.path.exists(p):
-                return p
+            path = uri[7:]
+            if os.path.exists(path):
+                return path
     except Exception:
         pass
+
     for root in ("/usr/share/backgrounds", "/usr/share/zorin-os"):
-        p = Path(root)
-        if p.exists():
-            for pat in ("*zorin*.jpg", "*zorin*.png", "*.jpg", "*.png"):
-                found = next(iter(p.rglob(pat)), None)
+        root_path = Path(root)
+        if root_path.exists():
+            for pattern in ("*zorin*.jpg", "*zorin*.png", "*.jpg", "*.png"):
+                found = next(iter(root_path.rglob(pattern)), None)
                 if found:
                     return str(found)
     return None
@@ -119,16 +133,19 @@ def css_for(wallpaper):
     bg = ""
     if wallpaper:
         esc = wallpaper.replace("\\", "\\\\").replace('"', '\\"')
-        bg = f'background-image: url("file://{esc}"); background-size: cover; background-position: center;'
+        bg = (
+            f'background-image: url("file://{esc}"); '
+            'background-size: cover; background-position: center;'
+        )
     return f"""
     window.q704-keyboard {{
         {bg}
-        background-color: rgba(20, 24, 34, 0.97);
+        background-color: rgba(20, 24, 34, 0.98);
     }}
     .keyboard-panel {{
-        background-color: rgba(18, 22, 31, 0.84);
-        border-radius: 22px;
-        padding: 14px;
+        background-color: rgba(18, 22, 31, 0.87);
+        border-radius: 22px 22px 0 0;
+        padding: 12px 14px 14px 14px;
     }}
     button.key {{
         min-height: 52px;
@@ -137,7 +154,7 @@ def css_for(wallpaper):
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.13);
         background-image: none;
-        background-color: rgba(42, 48, 62, 0.92);
+        background-color: rgba(42, 48, 62, 0.94);
         color: #ffffff;
         font-weight: 600;
         font-size: 16px;
@@ -148,6 +165,9 @@ def css_for(wallpaper):
     }}
     button.key:active, button.shift-on {{
         background-color: #2d7ef7;
+    }}
+    button.enter-key {{
+        background-color: rgba(45, 126, 247, 0.92);
     }}
     button.handle {{
         min-width: 56px;
@@ -173,11 +193,16 @@ class KeyboardApp:
         self.ctrl = False
         self.alt = False
         self.key_buttons = []
+        self.enter_buttons = []
+        self.hide_timer = None
+        self.keyboard_height = 0
 
         provider = Gtk.CssProvider()
         provider.load_from_data(css_for(current_wallpaper()).encode())
         Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
         self.keyboard = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
@@ -192,7 +217,9 @@ class KeyboardApp:
         self.keyboard.set_accept_focus(False)
         self.keyboard.set_focus_on_map(False)
         self.keyboard.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.keyboard.set_gravity(Gdk.Gravity.SOUTH_WEST)
         self.keyboard.connect("delete-event", self.on_hide)
+        self.keyboard.connect("map-event", self.on_keyboard_mapped)
 
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         panel.get_style_context().add_class("keyboard-panel")
@@ -203,14 +230,17 @@ class KeyboardApp:
             box.set_homogeneous(False)
             panel.pack_start(box, True, True, 0)
             for label, action, weight in row:
-                b = Gtk.Button(label=label)
-                b.set_can_focus(False)
-                b.set_focus_on_click(False)
-                b.get_style_context().add_class("key")
-                b.connect("clicked", self.on_key, action)
-                box.pack_start(b, True, True, 0)
-                b.set_size_request(max(42, int(54 * weight)), 54)
-                self.key_buttons.append((b, label, action))
+                button = Gtk.Button(label=label)
+                button.set_can_focus(False)
+                button.set_focus_on_click(False)
+                button.get_style_context().add_class("key")
+                if action == "Enter":
+                    button.get_style_context().add_class("enter-key")
+                    self.enter_buttons.append(button)
+                button.connect("clicked", self.on_key, action)
+                box.pack_start(button, True, True, 0)
+                button.set_size_request(max(42, int(54 * weight)), 54)
+                self.key_buttons.append((button, label, action))
 
         self.handle = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.handle.set_decorated(False)
@@ -221,40 +251,51 @@ class KeyboardApp:
         self.handle.set_accept_focus(False)
         self.handle.set_focus_on_map(False)
         self.handle.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        hb = Gtk.Button(label="⌨")
-        hb.set_can_focus(False)
-        hb.set_focus_on_click(False)
-        hb.get_style_context().add_class("handle")
-        hb.set_tooltip_text("Mở / ẩn bàn phím Q704")
-        hb.connect("clicked", self.toggle)
-        self.handle.add(hb)
+
+        handle_button = Gtk.Button(label="⌨")
+        handle_button.set_can_focus(False)
+        handle_button.set_focus_on_click(False)
+        handle_button.get_style_context().add_class("handle")
+        handle_button.set_tooltip_text("Mở / ẩn bàn phím Q704")
+        handle_button.connect("clicked", self.toggle)
+        self.handle.add(handle_button)
 
         self.handle.show_all()
         GLib.idle_add(self.position_handle)
-        GLib.timeout_add(1500, self.keep_positioned)
+        GLib.timeout_add(1200, self.keep_positioned)
+        GLib.idle_add(self.setup_accessibility_watcher)
 
     def show_fatal(self, ex):
-        d = Gtk.MessageDialog(
-            transient_for=None, flags=0, message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.CLOSE, text="Q704 Zorin Keyboard chưa truy cập được /dev/uinput"
+        dialog = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text="Q704 Zorin Keyboard chưa truy cập được /dev/uinput",
         )
-        d.format_secondary_text(
+        dialog.format_secondary_text(
             f"{ex}\n\nHãy chạy:\n"
             "sudo modprobe uinput\n"
             "sudo udevadm control --reload-rules\n"
             "sudo udevadm trigger /dev/uinput\n"
             "sau đó đăng xuất/đăng nhập lại nếu cần."
         )
-        d.run()
-        d.destroy()
+        dialog.run()
+        dialog.destroy()
         GLib.idle_add(Gtk.main_quit)
 
     def screen_geometry(self):
-        scr = Gdk.Screen.get_default()
-        mon = scr.get_primary_monitor()
-        if mon < 0:
-            mon = 0
-        return scr.get_monitor_geometry(mon)
+        screen = Gdk.Screen.get_default()
+        monitor = screen.get_primary_monitor()
+        if monitor < 0:
+            monitor = 0
+        return screen.get_monitor_geometry(monitor)
+
+    def keyboard_dimensions(self):
+        geo = self.screen_geometry()
+        width = geo.width
+        height = min(380, max(300, int(geo.height * 0.40)))
+        return width, height
 
     def position_handle(self):
         geo = self.screen_geometry()
@@ -265,42 +306,205 @@ class KeyboardApp:
     def keep_positioned(self):
         if self.handle.get_visible():
             self.position_handle()
+        if self.keyboard.get_visible():
+            self.position_keyboard()
         return True
 
     def position_keyboard(self):
         geo = self.screen_geometry()
-        width = max(800, int(geo.width * 0.96))
-        height = min(380, max(300, int(geo.height * 0.42)))
+        width, height = self.keyboard_dimensions()
+        self.keyboard_height = height
         self.keyboard.resize(width, height)
-        self.keyboard.move(geo.x + (geo.width - width)//2, geo.y + geo.height - height - 12)
+        self.keyboard.move(geo.x, geo.y + geo.height - height)
+
+    def on_keyboard_mapped(self, *_):
+        self.position_keyboard()
+        GLib.timeout_add(80, self.apply_bottom_strut)
+        return False
+
+    def x11_window_id(self):
+        if GdkX11 is None:
+            return None
+        gdk_window = self.keyboard.get_window()
+        if not gdk_window:
+            return None
+        try:
+            return GdkX11.X11Window.get_xid(gdk_window)
+        except Exception:
+            try:
+                return gdk_window.get_xid()
+            except Exception:
+                return None
+
+    def apply_bottom_strut(self):
+        xid = self.x11_window_id()
+        if not xid or not self.keyboard.get_visible():
+            return False
+
+        geo = self.screen_geometry()
+        height = self.keyboard_height or self.keyboard_dimensions()[1]
+        start_x = max(0, geo.x)
+        end_x = max(start_x, geo.x + geo.width - 1)
+
+        try:
+            subprocess.run([
+                "xprop", "-id", str(xid),
+                "-f", "_NET_WM_STRUT", "32c",
+                "-set", "_NET_WM_STRUT",
+                f"0, 0, 0, {height}",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run([
+                "xprop", "-id", str(xid),
+                "-f", "_NET_WM_STRUT_PARTIAL", "32c",
+                "-set", "_NET_WM_STRUT_PARTIAL",
+                f"0, 0, 0, {height}, 0, 0, 0, 0, 0, 0, {start_x}, {end_x}",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
+        return False
+
+    def clear_bottom_strut(self):
+        xid = self.x11_window_id()
+        if not xid:
+            return
+        try:
+            subprocess.run(
+                ["xprop", "-id", str(xid), "-remove", "_NET_WM_STRUT"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+            subprocess.run(
+                ["xprop", "-id", str(xid), "-remove", "_NET_WM_STRUT_PARTIAL"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        except Exception:
+            pass
+
+    def show_keyboard(self):
+        if self.hide_timer:
+            try:
+                GLib.source_remove(self.hide_timer)
+            except Exception:
+                pass
+            self.hide_timer = None
+        if not self.keyboard.get_visible():
+            self.keyboard.show_all()
+        self.position_keyboard()
+        GLib.timeout_add(80, self.apply_bottom_strut)
+        return False
+
+    def hide_keyboard(self):
+        if self.keyboard.get_visible():
+            self.clear_bottom_strut()
+            self.keyboard.hide()
+        return False
 
     def toggle(self, *_):
         if self.keyboard.get_visible():
-            self.keyboard.hide()
+            self.hide_keyboard()
         else:
-            self.keyboard.show_all()
-            self.position_keyboard()
+            self.show_keyboard()
 
     def on_hide(self, *_):
-        self.keyboard.hide()
+        self.hide_keyboard()
         return True
 
+    def setup_accessibility_watcher(self):
+        if pyatspi is None:
+            return False
+        try:
+            pyatspi.Registry.registerEventListener(
+                self.on_focus_event,
+                "object:state-changed:focused",
+            )
+        except Exception:
+            pass
+        return False
+
+    def accessible_is_editable(self, obj):
+        if obj is None or pyatspi is None:
+            return False
+
+        try:
+            state = obj.getState()
+            if state.contains(pyatspi.STATE_EDITABLE):
+                return True
+        except Exception:
+            pass
+
+        try:
+            role = obj.getRole()
+            if role in (
+                getattr(pyatspi, "ROLE_ENTRY", -1),
+                getattr(pyatspi, "ROLE_PASSWORD_TEXT", -1),
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def update_enter_mode(self, obj):
+        label = "↵"
+        text = ""
+        try:
+            text = " ".join([
+                str(getattr(obj, "name", "") or ""),
+                str(getattr(obj, "description", "") or ""),
+            ]).lower()
+        except Exception:
+            pass
+
+        search_words = ("search", "tìm", "find", "address", "url")
+        send_words = ("message", "tin nhắn", "chat", "comment", "reply", "gửi", "send")
+
+        if any(word in text for word in search_words):
+            label = "Tìm ↵"
+        elif any(word in text for word in send_words):
+            label = "Gửi ↵"
+
+        for button in self.enter_buttons:
+            button.set_label(label)
+
+    def on_focus_event(self, event):
+        try:
+            focused = bool(event.detail1)
+            source = event.source
+        except Exception:
+            return
+
+        if focused and self.accessible_is_editable(source):
+            self.update_enter_mode(source)
+            GLib.idle_add(self.show_keyboard)
+            return
+
+        if focused and not self.accessible_is_editable(source):
+            if self.hide_timer:
+                try:
+                    GLib.source_remove(self.hide_timer)
+                except Exception:
+                    pass
+            self.hide_timer = GLib.timeout_add(220, self.hide_if_focus_still_not_editable)
+
+    def hide_if_focus_still_not_editable(self):
+        self.hide_timer = None
+        self.hide_keyboard()
+        return False
+
     def update_shift_labels(self):
-        for b, original, action in self.key_buttons:
-            if action in ("Shift",):
-                ctx = b.get_style_context()
+        for button, original, action in self.key_buttons:
+            if action == "Shift":
+                ctx = button.get_style_context()
                 if self.shift:
                     ctx.add_class("shift-on")
                 else:
                     ctx.remove_class("shift-on")
             elif len(action) == 1 and action.isalpha():
-                b.set_label(original.upper() if self.shift else original.lower())
+                button.set_label(original.upper() if self.shift else original.lower())
             elif action in SHIFT_LABELS:
-                b.set_label(SHIFT_LABELS[action] if self.shift else original)
+                button.set_label(SHIFT_LABELS[action] if self.shift else original)
 
     def on_key(self, _button, action):
         if action == "Hide":
-            self.keyboard.hide()
+            self.hide_keyboard()
             return
         if action == "Shift":
             self.shift = not self.shift
@@ -313,7 +517,6 @@ class KeyboardApp:
             self.alt = not self.alt
             return
         if action == "IME":
-            # Common Fcitx/IBus toggle: Ctrl+Space.
             self.backend.tap(e.KEY_SPACE, ctrl=True)
             return
 
@@ -322,11 +525,15 @@ class KeyboardApp:
             return
 
         self.backend.tap(code, shift=self.shift, ctrl=self.ctrl, alt=self.alt)
+
         if self.shift:
             self.shift = False
             self.update_shift_labels()
         self.ctrl = False
         self.alt = False
+
+        if action == "Enter":
+            GLib.timeout_add(120, self.hide_keyboard)
 
     def run(self):
         Gtk.main()
