@@ -258,7 +258,7 @@ class KeyboardApp:
         self.start_fcitx_monitor()
 
         GLib.timeout_add(800, self.keep_positioned)
-        GLib.timeout_add(900, self.poll_focused_editable)
+        GLib.timeout_add(2500, self.poll_focused_editable)
         GLib.timeout_add(1200, self.start_accessibility_later)
 
     def start_accessibility_later(self):
@@ -455,55 +455,70 @@ class KeyboardApp:
         return True
 
     def start_fcitx_monitor(self):
-        if self.fcitx_thread and self.fcitx_thread.is_alive():
+        if self.fcitx_monitor and self.fcitx_monitor.poll() is None:
             return False
 
-        self.fcitx_thread = threading.Thread(
-            target=self._fcitx_monitor_loop,
-            name="q704-fcitx-monitor",
-            daemon=True,
-        )
-        self.fcitx_thread.start()
+        try:
+            # Spawn in GTK/main thread. Only reading is delegated to a worker.
+            self.fcitx_monitor = subprocess.Popen(
+                [
+                    "/usr/bin/stdbuf", "-oL", "-eL",
+                    "/usr/bin/dbus-monitor",
+                    "--session",
+                    "interface='org.fcitx.Fcitx.InputContext1'",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            print(
+                f"[Q704] Fcitx5 DBus monitor started pid={self.fcitx_monitor.pid}",
+                flush=True,
+            )
+
+            self.fcitx_thread = threading.Thread(
+                target=self._fcitx_read_loop,
+                args=(self.fcitx_monitor,),
+                name="q704-fcitx-reader",
+                daemon=True,
+            )
+            self.fcitx_thread.start()
+        except Exception as ex:
+            print(f"[Q704] Fcitx monitor start error: {ex}", flush=True)
+            GLib.timeout_add(1200, self.start_fcitx_monitor)
+
         return False
 
-    def _fcitx_monitor_loop(self):
-        while True:
-            try:
-                proc = subprocess.Popen(
-                    [
-                        "/usr/bin/dbus-monitor",
-                        "--session",
-                        "type='method_call',interface='org.fcitx.Fcitx.InputContext1'",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                )
-                self.fcitx_monitor = proc
-                print("[Q704] Fcitx5 DBus monitor started", flush=True)
+    def _fcitx_read_loop(self, proc):
+        try:
+            for raw in proc.stdout:
+                line = raw.strip()
 
-                for raw in proc.stdout:
-                    line = raw.strip()
-                    if "member=FocusIn" in line:
-                        print("[Q704] FCITX FocusIn", flush=True)
-                        self.fcitx_focus = True
-                        GLib.idle_add(self.show_keyboard)
-                    elif "member=FocusOut" in line or "member=NotifyFocusOut" in line:
-                        print("[Q704] FCITX FocusOut", flush=True)
-                        self.fcitx_focus = False
-                        GLib.timeout_add(260, self.hide_after_fcitx_focusout)
-                    elif "member=SetCursorRect" in line and not self.keyboard.get_visible():
-                        # Some clients update cursor geometry before/without a
-                        # visible FocusIn line. This is still a strong signal
-                        # that an input context is active.
-                        self.fcitx_focus = True
-                        GLib.idle_add(self.show_keyboard)
+                if "member=FocusIn" in line:
+                    print("[Q704] FCITX FocusIn", flush=True)
+                    self.fcitx_focus = True
+                    GLib.idle_add(self.show_keyboard)
 
-                proc.wait(timeout=1)
-            except Exception as ex:
-                print(f"[Q704] Fcitx monitor error: {ex}", flush=True)
-                time.sleep(1.0)
+                elif "member=FocusOut" in line or "member=NotifyFocusOut" in line:
+                    print("[Q704] FCITX FocusOut", flush=True)
+                    self.fcitx_focus = False
+                    GLib.timeout_add(300, self.hide_after_fcitx_focusout)
+
+                elif "member=SetCursorRect" in line or "member=SetCursorRectV2" in line:
+                    # Cursor rect is emitted by focused editable clients.
+                    if not self.fcitx_focus:
+                        print("[Q704] FCITX editable cursor", flush=True)
+                    self.fcitx_focus = True
+                    GLib.idle_add(self.show_keyboard)
+
+            rc = proc.wait()
+            print(f"[Q704] Fcitx monitor exited rc={rc}", flush=True)
+        except Exception as ex:
+            print(f"[Q704] Fcitx reader error: {ex}", flush=True)
+        finally:
+            self.fcitx_monitor = None
+            GLib.timeout_add(1200, self.start_fcitx_monitor)
 
     def hide_after_fcitx_focusout(self):
         if not self.fcitx_focus:
