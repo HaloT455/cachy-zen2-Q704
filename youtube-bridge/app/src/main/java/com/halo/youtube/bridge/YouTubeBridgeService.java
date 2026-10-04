@@ -97,6 +97,16 @@ public class YouTubeBridgeService extends AccessibilityService {
         String pkg = pkgSeq.toString();
 
         if (KATNISS_PACKAGE.equals(pkg)) {
+            logKatnissEvent(event);
+
+            CharSequence clsSeq = event.getClassName();
+            String cls = clsSeq == null ? "" : clsSeq.toString();
+            if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    && cls.contains("VoicePlateActivity")) {
+                resetAssistantInteraction();
+                Log.i(TAG, "New Katniss voice interaction: state reset");
+            }
+
             captureAssistantContext(event);
 
             // If Katniss emits another visible response event immediately after we
@@ -195,6 +205,50 @@ public class YouTubeBridgeService extends AccessibilityService {
 
     }
 
+    private void resetAssistantInteraction() {
+        lastAssistantUtterance = "";
+        lastAssistantUtteranceMs = 0L;
+        lastAssistantAnyUtterance = "";
+        lastAssistantAnyUtteranceMs = 0L;
+        lastAssistantClickedText = "";
+        lastAssistantClickedTextMs = 0L;
+        lastPlayStoreRedirectMs = 0L;
+        handler.removeCallbacks(directAssistantLaunchRunnable);
+        handler.removeCallbacks(checkPlayStoreRunnable);
+        handler.removeCallbacks(checkPlayStoreRetryRunnable);
+        handler.removeCallbacks(checkPlayStoreRetry2Runnable);
+    }
+
+    private void logKatnissEvent(AccessibilityEvent event) {
+        int type = event.getEventType();
+        if (type != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                && type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && type != AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        List<CharSequence> texts = event.getText();
+        if (texts != null) {
+            for (CharSequence cs : texts) {
+                if (cs == null) continue;
+                String s = cs.toString().trim();
+                if (s.isEmpty()) continue;
+                if (sb.length() > 0) sb.append(" | ");
+                sb.append(s);
+                if (sb.length() > 180) break;
+            }
+        }
+
+        CharSequence cls = event.getClassName();
+        CharSequence desc = event.getContentDescription();
+        Log.i(TAG, "Katniss event type=" + type
+                + " class=" + (cls == null ? "" : cls)
+                + " text=[" + sb + "]"
+                + " desc=[" + (desc == null ? "" : desc) + "]");
+    }
+
     private void captureAssistantContext(AccessibilityEvent event) {
         long now = SystemClock.elapsedRealtime();
 
@@ -256,6 +310,22 @@ public class YouTubeBridgeService extends AccessibilityService {
         if (source != null) {
             best = chooseBetter(best, source.getText(), requireYoutube);
             best = chooseBetter(best, source.getContentDescription(), requireYoutube);
+
+            if (best.isEmpty()) {
+                ArrayDeque<AccessibilityNodeInfo> q = new ArrayDeque<>();
+                q.add(source);
+                int inspected = 0;
+                while (!q.isEmpty() && inspected < 80) {
+                    AccessibilityNodeInfo n = q.removeFirst();
+                    inspected++;
+                    best = chooseBetter(best, n.getText(), requireYoutube);
+                    best = chooseBetter(best, n.getContentDescription(), requireYoutube);
+                    for (int i = 0; i < n.getChildCount(); i++) {
+                        AccessibilityNodeInfo child = n.getChild(i);
+                        if (child != null) q.addLast(child);
+                    }
+                }
+            }
         }
 
         return best;
