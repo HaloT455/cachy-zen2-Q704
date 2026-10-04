@@ -13,6 +13,13 @@ except Exception:
     GdkX11 = None
 
 from gi.repository import Gtk, Gdk, GLib
+
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3
+except Exception:
+    AyatanaAppIndicator3 = None
+
 from evdev import UInput, ecodes as e
 
 try:
@@ -242,26 +249,9 @@ class KeyboardApp:
                 button.set_size_request(max(42, int(54 * weight)), 54)
                 self.key_buttons.append((button, label, action))
 
-        self.handle = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
-        self.handle.set_decorated(False)
-        self.handle.set_resizable(False)
-        self.handle.set_keep_above(True)
-        self.handle.set_skip_taskbar_hint(True)
-        self.handle.set_skip_pager_hint(True)
-        self.handle.set_accept_focus(False)
-        self.handle.set_focus_on_map(False)
-        self.handle.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        self.indicator = None
+        self.setup_panel_indicator()
 
-        handle_button = Gtk.Button(label="⌨")
-        handle_button.set_can_focus(False)
-        handle_button.set_focus_on_click(False)
-        handle_button.get_style_context().add_class("handle")
-        handle_button.set_tooltip_text("Mở / ẩn bàn phím Q704")
-        handle_button.connect("clicked", self.toggle)
-        self.handle.add(handle_button)
-
-        self.handle.show_all()
-        GLib.idle_add(self.position_handle)
         GLib.timeout_add(1200, self.keep_positioned)
         GLib.idle_add(self.setup_accessibility_watcher)
         GLib.timeout_add(700, self.poll_focused_editable)
@@ -309,15 +299,46 @@ class KeyboardApp:
         height = min(380, max(300, int(work.height * 0.40)))
         return width, height
 
-    def position_handle(self):
-        _geo, work = self.monitor_info()
-        self.handle.resize(60, 60)
-        self.handle.move(work.x + work.width - 78, work.y + work.height - 72)
-        return False
+    def setup_panel_indicator(self):
+        if AyatanaAppIndicator3 is None:
+            return
+
+        self.indicator = AyatanaAppIndicator3.Indicator.new(
+            "q704-zorin-keyboard",
+            "input-keyboard-symbolic",
+            AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("Q704 Keyboard")
+
+        menu = Gtk.Menu()
+
+        toggle_item = Gtk.MenuItem(label="Mở / ẩn bàn phím")
+        toggle_item.connect("activate", self.toggle)
+        menu.append(toggle_item)
+
+        hide_item = Gtk.MenuItem(label="Ẩn bàn phím")
+        hide_item.connect("activate", lambda *_: self.hide_keyboard())
+        menu.append(hide_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        quit_item = Gtk.MenuItem(label="Thoát Q704 Keyboard")
+        quit_item.connect("activate", self.quit_app)
+        menu.append(quit_item)
+
+        menu.show_all()
+        self.indicator.set_menu(menu)
+
+    def quit_app(self, *_):
+        self.hide_keyboard()
+        try:
+            self.backend.close()
+        except Exception:
+            pass
+        Gtk.main_quit()
 
     def keep_positioned(self):
-        if self.handle.get_visible():
-            self.position_handle()
         if self.keyboard.get_visible():
             self.position_keyboard()
         return True
