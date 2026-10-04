@@ -1,9 +1,55 @@
 #!/usr/bin/env python3
+import ast
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
+
+def resolve_atspi_bus():
+    existing = os.environ.get("AT_SPI_BUS_ADDRESS", "").strip()
+    if existing:
+        print(f"[Q704-FOCUS] AT-SPI bus from env: {existing}", flush=True)
+        return existing
+
+    last_error = None
+    for attempt in range(1, 11):
+        try:
+            raw = subprocess.check_output(
+                [
+                    "/usr/bin/gdbus", "call", "--session",
+                    "--dest", "org.a11y.Bus",
+                    "--object-path", "/org/a11y/bus",
+                    "--method", "org.a11y.Bus.GetAddress",
+                ],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=3,
+            ).strip()
+
+            parsed = ast.literal_eval(raw)
+            address = parsed[0] if isinstance(parsed, tuple) else str(parsed)
+            address = str(address).strip()
+
+            if address:
+                os.environ["AT_SPI_BUS_ADDRESS"] = address
+                print(
+                    f"[Q704-FOCUS] AT-SPI bus resolved on attempt {attempt}: {address}",
+                    flush=True,
+                )
+                return address
+        except Exception as ex:
+            last_error = ex
+            print(
+                f"[Q704-FOCUS] waiting for AT-SPI bus attempt {attempt}/10: {ex}",
+                flush=True,
+            )
+            time.sleep(0.5)
+
+    raise RuntimeError(f"cannot resolve AT-SPI bus: {last_error}")
+
+resolve_atspi_bus()
 
 import pyatspi
 
@@ -228,6 +274,16 @@ print(
     f"[Q704-FOCUS] helper started pid={os.getpid()} parent={PARENT_PID}",
     flush=True,
 )
+
+try:
+    _desktop_probe = pyatspi.Registry.getDesktop(0)
+    print(
+        f"[Q704-FOCUS] AT-SPI connected, desktop children={_desktop_probe.childCount}",
+        flush=True,
+    )
+except Exception as ex:
+    print(f"[Q704-FOCUS] AT-SPI probe failed: {ex}", flush=True)
+    raise
 
 # Polling is the fallback for apps that do not emit reliable focus events.
 threading.Thread(
