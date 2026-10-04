@@ -60,7 +60,8 @@ PARENT_PID = int(sys.argv[1])
 
 _last_visible = False
 _last_desc = ""
-_hide_misses = 0
+_hide_deadline = 0.0
+_dbus_input_active = False
 _lock = threading.Lock()
 
 EDITABLE_ROLES = {
@@ -140,10 +141,10 @@ def is_editable(obj):
     return False
 
 def emit_visibility(show, obj=None, reason="event"):
-    global _last_visible, _last_desc, _hide_misses
+    global _last_visible, _last_desc, _hide_deadline
     with _lock:
         if show:
-            _hide_misses = 0
+            _hide_deadline = 0.0
             desc = describe(obj) if obj is not None else ""
             if not _last_visible or desc != _last_desc:
                 print(f"[Q704-FOCUS] SHOW/{reason} {desc}", flush=True)
@@ -151,14 +152,35 @@ def emit_visibility(show, obj=None, reason="event"):
             _last_visible = True
             _last_desc = desc
         else:
-            _hide_misses += 1
-            # Debounce focus transitions (input -> popup -> input).
-            if _last_visible and _hide_misses >= 3:
-                print(f"[Q704-FOCUS] HIDE/{reason}", flush=True)
-                send(signal.SIGUSR2)
+            # Delay hide so transient FocusOut during clicks/popups cannot
+            # immediately cancel a genuine SHOW from the input field.
+            if _last_visible:
+                _hide_deadline = time.monotonic() + 0.45
+                print(f"[Q704-FOCUS] HIDE-SCHEDULE/{reason}", flush=True)
+
+
+def hide_worker_loop():
+    global _last_visible, _last_desc, _hide_deadline
+    while parent_alive():
+        do_hide = False
+        with _lock:
+            if (
+                _last_visible
+                and _hide_deadline > 0.0
+                and time.monotonic() >= _hide_deadline
+            ):
+                _hide_deadline = 0.0
                 _last_visible = False
                 _last_desc = ""
-                _hide_misses = 0
+                do_hide = True
+
+        if do_hide:
+            print("[Q704-FOCUS] HIDE/commit", flush=True)
+            send(signal.SIGUSR2)
+
+        time.sleep(0.05)
+
+    os._exit(0)
 
 def on_focus(event):
     try:
@@ -255,6 +277,7 @@ def currently_focused_object():
 
 
 def dbus_input_monitor_loop():
+    global _dbus_input_active
     print("[Q704-FOCUS] DBus input monitor started", flush=True)
 
     while parent_alive():
@@ -289,9 +312,11 @@ def dbus_input_monitor_loop():
                     continue
 
                 if "member=FocusIn" in line or "member=focus_in" in line:
+                    _dbus_input_active = True
                     print(f"[Q704-FOCUS] DBUS SHOW {line}", flush=True)
                     emit_visibility(True, None, "dbus-focus")
                 elif "member=FocusOut" in line or "member=focus_out" in line:
+                    _dbus_input_active = False
                     print(f"[Q704-FOCUS] DBUS HIDE {line}", flush=True)
                     emit_visibility(False, None, "dbus-focus")
                 elif (
@@ -299,8 +324,11 @@ def dbus_input_monitor_loop():
                     or "member=SetCursorLocation" in line
                     or "member=set_cursor_location" in line
                 ):
-                    print(f"[Q704-FOCUS] DBUS CURSOR {line}", flush=True)
-                    emit_visibility(True, None, "dbus-cursor")
+                    # Cursor updates can arrive after focus has already left.
+                    # Only treat them as SHOW while an input context is active.
+                    if _dbus_input_active:
+                        print(f"[Q704-FOCUS] DBUS CURSOR {line}", flush=True)
+                        emit_visibility(True, None, "dbus-cursor")
 
             try:
                 proc.wait(timeout=1)
@@ -324,9 +352,9 @@ def polling_loop():
         try:
             obj = currently_focused_object()
             if obj is not None and is_editable(obj):
+                # Polling is SHOW-only. Missing/stale focus information must
+                # never hide a keyboard that was opened by a real focus event.
                 emit_visibility(True, obj, "poll")
-            else:
-                emit_visibility(False, obj, "poll")
         except Exception as ex:
             print(f"[Q704-FOCUS] polling error: {ex}", flush=True)
 
@@ -348,6 +376,12 @@ try:
 except Exception as ex:
     print(f"[Q704-FOCUS] AT-SPI probe failed: {ex}", flush=True)
     raise
+
+threading.Thread(
+    target=hide_worker_loop,
+    name="q704-hide-worker",
+    daemon=True,
+).start()
 
 # Fcitx5/IBus focus is the most direct signal that an input field is active.
 threading.Thread(
