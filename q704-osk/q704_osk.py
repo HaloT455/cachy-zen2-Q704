@@ -147,10 +147,10 @@ def css_for(wallpaper):
     return f"""
     window.q704-keyboard {{
         {bg}
-        background-color: rgba(20, 24, 34, 0.98);
+        background-color: rgba(62, 24, 45, 0.98);
     }}
     .keyboard-panel {{
-        background-color: rgba(18, 22, 31, 0.87);
+        background-color: rgba(70, 28, 51, 0.90);
         border-radius: 22px 22px 0 0;
         padding: 12px 14px 14px 14px;
     }}
@@ -161,27 +161,27 @@ def css_for(wallpaper):
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.13);
         background-image: none;
-        background-color: rgba(42, 48, 62, 0.94);
+        background-color: rgba(92, 46, 67, 0.95);
         color: #ffffff;
         font-weight: 600;
         font-size: 16px;
         box-shadow: inset 0 1px rgba(255,255,255,0.06);
     }}
     button.key:hover {{
-        background-color: rgba(63, 142, 255, 0.82);
+        background-color: rgba(255, 111, 168, 0.90);
     }}
     button.key:active, button.shift-on {{
-        background-color: #2d7ef7;
+        background-color: #ff5fa2;
     }}
     button.enter-key {{
-        background-color: rgba(45, 126, 247, 0.92);
+        background-color: rgba(255, 79, 154, 0.96);
     }}
     button.handle {{
         min-width: 56px;
         min-height: 56px;
         border-radius: 18px;
         background-image: none;
-        background-color: rgba(28, 34, 46, 0.94);
+        background-color: rgba(92, 46, 67, 0.95);
         color: white;
         font-size: 25px;
         border: 1px solid rgba(255,255,255,0.18);
@@ -305,7 +305,7 @@ class KeyboardApp:
 
         self.indicator = AyatanaAppIndicator3.Indicator.new(
             "q704-zorin-keyboard",
-            "input-keyboard-symbolic",
+            "q704-keyboard-pink",
             AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
         self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
