@@ -253,6 +253,70 @@ def currently_focused_object():
 
     return None
 
+
+def dbus_input_monitor_loop():
+    print("[Q704-FOCUS] DBus input monitor started", flush=True)
+
+    while parent_alive():
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    "/usr/bin/dbus-monitor",
+                    "--session",
+                    "type='method_call'",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+
+            for raw in proc.stdout:
+                if not parent_alive():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return
+
+                line = raw.strip()
+
+                is_fcitx = "interface=org.fcitx.Fcitx.InputContext1" in line
+                is_ibus = "interface=org.freedesktop.IBus.InputContext" in line
+
+                if not (is_fcitx or is_ibus):
+                    continue
+
+                if "member=FocusIn" in line or "member=focus_in" in line:
+                    print(f"[Q704-FOCUS] DBUS SHOW {line}", flush=True)
+                    emit_visibility(True, None, "dbus-focus")
+                elif "member=FocusOut" in line or "member=focus_out" in line:
+                    print(f"[Q704-FOCUS] DBUS HIDE {line}", flush=True)
+                    emit_visibility(False, None, "dbus-focus")
+                elif (
+                    "member=SetCursorRect" in line
+                    or "member=SetCursorLocation" in line
+                    or "member=set_cursor_location" in line
+                ):
+                    print(f"[Q704-FOCUS] DBUS CURSOR {line}", flush=True)
+                    emit_visibility(True, None, "dbus-cursor")
+
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+
+        except Exception as ex:
+            print(f"[Q704-FOCUS] DBus monitor error: {ex}", flush=True)
+            time.sleep(1.0)
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
 def polling_loop():
     print("[Q704-FOCUS] polling started 200ms", flush=True)
 
@@ -285,7 +349,14 @@ except Exception as ex:
     print(f"[Q704-FOCUS] AT-SPI probe failed: {ex}", flush=True)
     raise
 
-# Polling is the fallback for apps that do not emit reliable focus events.
+# Fcitx5/IBus focus is the most direct signal that an input field is active.
+threading.Thread(
+    target=dbus_input_monitor_loop,
+    name="q704-dbus-input-monitor",
+    daemon=True,
+).start()
+
+# AT-SPI polling remains the fallback for Wayland/native apps.
 threading.Thread(
     target=polling_loop,
     name="q704-focus-poll",
