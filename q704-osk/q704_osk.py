@@ -308,6 +308,10 @@ class KeyboardApp:
             "q704-keyboard-pink",
             AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
+        try:
+            self.indicator.set_icon_theme_path("/usr/share/icons/hicolor/scalable/apps")
+        except Exception:
+            pass
         self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("Q704 Keyboard")
 
