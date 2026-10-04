@@ -253,10 +253,17 @@ class KeyboardApp:
         self.fcitx_thread = None
         self.fcitx_focus = False
 
+        # Start Fcitx monitor immediately. Do not defer this behind AT-SPI:
+        # on this Zorin session AT-SPI registration can delay later idle jobs.
+        self.start_fcitx_monitor()
+
         GLib.timeout_add(800, self.keep_positioned)
-        GLib.idle_add(self.setup_accessibility_watcher)
         GLib.timeout_add(900, self.poll_focused_editable)
-        GLib.idle_add(self.start_fcitx_monitor)
+        GLib.timeout_add(1200, self.start_accessibility_later)
+
+    def start_accessibility_later(self):
+        self.setup_accessibility_watcher()
+        return False
 
     def show_fatal(self, ex):
         dialog = Gtk.MessageDialog(
