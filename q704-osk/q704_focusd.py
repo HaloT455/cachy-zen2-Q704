@@ -62,6 +62,8 @@ _last_visible = False
 _last_desc = ""
 _hide_deadline = 0.0
 _dbus_input_active = False
+_atspi_input_active = False
+_poll_misses = 0
 _lock = threading.Lock()
 
 EDITABLE_ROLES = {
@@ -146,16 +148,25 @@ def emit_visibility(show, obj=None, reason="event"):
         if show:
             _hide_deadline = 0.0
             desc = describe(obj) if obj is not None else ""
-            if not _last_visible or desc != _last_desc:
+
+            # Important: repeated focus/caret/poll events must NOT re-send SHOW.
+            # Re-sending SIGUSR1 while already visible caused the keyboard to
+            # jump/reposition and look "loạn".
+            if not _last_visible:
                 print(f"[Q704-FOCUS] SHOW/{reason} {desc}", flush=True)
                 send(signal.SIGUSR1)
-            _last_visible = True
-            _last_desc = desc
+                _last_visible = True
+
+            if desc:
+                _last_desc = desc
         else:
-            # Delay hide so transient FocusOut during clicks/popups cannot
-            # immediately cancel a genuine SHOW from the input field.
+            # Never hide while either authoritative source still says an input
+            # context is active.
+            if _dbus_input_active or _atspi_input_active:
+                return
+
             if _last_visible:
-                _hide_deadline = time.monotonic() + 0.45
+                _hide_deadline = time.monotonic() + 0.60
                 print(f"[Q704-FOCUS] HIDE-SCHEDULE/{reason}", flush=True)
 
 
@@ -168,6 +179,8 @@ def hide_worker_loop():
                 _last_visible
                 and _hide_deadline > 0.0
                 and time.monotonic() >= _hide_deadline
+                and not _dbus_input_active
+                and not _atspi_input_active
             ):
                 _hide_deadline = 0.0
                 _last_visible = False
@@ -183,6 +196,7 @@ def hide_worker_loop():
     os._exit(0)
 
 def on_focus(event):
+    global _atspi_input_active, _poll_misses
     try:
         focused = bool(event.detail1)
         obj = event.source
@@ -190,16 +204,24 @@ def on_focus(event):
         return
 
     if focused and is_editable(obj):
+        _atspi_input_active = True
+        _poll_misses = 0
         emit_visibility(True, obj, "focus")
     elif focused:
-        emit_visibility(False, obj, "focus-other")
+        _atspi_input_active = False
+        if not _dbus_input_active:
+            emit_visibility(False, obj, "focus-other")
 
 def on_caret(event):
+    global _atspi_input_active, _poll_misses
     obj = getattr(event, "source", None)
     if is_editable(obj):
+        _atspi_input_active = True
+        _poll_misses = 0
         emit_visibility(True, obj, "caret")
 
 def on_editable(event):
+    global _atspi_input_active, _poll_misses
     obj = getattr(event, "source", None)
     try:
         enabled = bool(event.detail1)
@@ -207,11 +229,16 @@ def on_editable(event):
         enabled = False
 
     if enabled and is_editable(obj):
+        _atspi_input_active = True
+        _poll_misses = 0
         emit_visibility(True, obj, "editable")
 
 def on_text_insert(event):
+    global _atspi_input_active, _poll_misses
     obj = getattr(event, "source", None)
     if is_editable(obj):
+        _atspi_input_active = True
+        _poll_misses = 0
         emit_visibility(True, obj, "text")
 
 def find_focused_descendant(root, max_nodes=5000):
@@ -313,22 +340,21 @@ def dbus_input_monitor_loop():
 
                 if "member=FocusIn" in line or "member=focus_in" in line:
                     _dbus_input_active = True
-                    print(f"[Q704-FOCUS] DBUS SHOW {line}", flush=True)
+                    print("[Q704-FOCUS] DBUS FocusIn", flush=True)
                     emit_visibility(True, None, "dbus-focus")
                 elif "member=FocusOut" in line or "member=focus_out" in line:
                     _dbus_input_active = False
-                    print(f"[Q704-FOCUS] DBUS HIDE {line}", flush=True)
-                    emit_visibility(False, None, "dbus-focus")
+                    print("[Q704-FOCUS] DBUS FocusOut", flush=True)
+                    if not _atspi_input_active:
+                        emit_visibility(False, None, "dbus-focus")
                 elif (
                     "member=SetCursorRect" in line
                     or "member=SetCursorLocation" in line
                     or "member=set_cursor_location" in line
                 ):
-                    # Cursor updates can arrive after focus has already left.
-                    # Only treat them as SHOW while an input context is active.
-                    if _dbus_input_active:
-                        print(f"[Q704-FOCUS] DBUS CURSOR {line}", flush=True)
-                        emit_visibility(True, None, "dbus-cursor")
+                    # Cursor geometry is noisy on Wayland/Chrome/Telegram.
+                    # Never use it to change keyboard visibility.
+                    pass
 
             try:
                 proc.wait(timeout=1)
@@ -346,19 +372,29 @@ def dbus_input_monitor_loop():
                     pass
 
 def polling_loop():
-    print("[Q704-FOCUS] polling started 200ms", flush=True)
+    global _atspi_input_active, _poll_misses
+    print("[Q704-FOCUS] polling started 250ms", flush=True)
 
     while parent_alive():
         try:
             obj = currently_focused_object()
             if obj is not None and is_editable(obj):
-                # Polling is SHOW-only. Missing/stale focus information must
-                # never hide a keyboard that was opened by a real focus event.
+                _poll_misses = 0
+                _atspi_input_active = True
                 emit_visibility(True, obj, "poll")
+            else:
+                _poll_misses += 1
+
+                # Require several consecutive misses before declaring AT-SPI
+                # inactive. This prevents transient focus gaps from flickering.
+                if _poll_misses >= 4:
+                    _atspi_input_active = False
+                    if not _dbus_input_active:
+                        emit_visibility(False, None, "poll-miss")
         except Exception as ex:
             print(f"[Q704-FOCUS] polling error: {ex}", flush=True)
 
-        time.sleep(0.20)
+        time.sleep(0.25)
 
     os._exit(0)
 
