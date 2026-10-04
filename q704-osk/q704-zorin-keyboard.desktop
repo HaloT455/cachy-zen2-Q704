@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Q704 Zorin Keyboard
+Comment=On-screen keyboard for Fujitsu Stylistic Q704
+Exec=env GDK_BACKEND=x11 /usr/bin/q704-zorin-keyboard
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false
