@@ -45,13 +45,32 @@ public class YouTubeBridgeService extends AccessibilityService {
             long now = SystemClock.elapsedRealtime();
             String query = getRecentAssistantQuery(now);
             lastAssistantRedirectMs = now;
+
+            // Dismiss the Assistant surface immediately after the final YouTube
+            // transcript is captured. On BRAVIA this prevents Katniss from continuing
+            // into the fallback response ("no app supports this package") while we
+            // route the request to youtubx ourselves.
+            Log.i(TAG, "Dismissing Assistant before direct YouTube redirect");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+
+            handler.removeCallbacks(checkPlayStoreRunnable);
+            handler.removeCallbacks(checkPlayStoreRetryRunnable);
+            handler.removeCallbacks(checkPlayStoreRetry2Runnable);
+
             if (query.isEmpty()) {
                 Log.i(TAG, "Direct Assistant launch -> mod home");
-                launchModHome();
+                handler.postDelayed(this::launchModHomeAfterDismiss, 90);
             } else {
                 Log.i(TAG, "Direct Assistant launch query=" + query);
-                launchModSearch(query);
+                final String q = query;
+                handler.postDelayed(() -> launchModSearch(q), 90);
             }
+
+            handler.postDelayed(YouTubeBridgeService.this::bringModTaskToFront, 650);
+        }
+
+        private void launchModHomeAfterDismiss() {
+            YouTubeBridgeService.this.launchModHome();
         }
     };
 
@@ -75,6 +94,19 @@ public class YouTubeBridgeService extends AccessibilityService {
 
         if (KATNISS_PACKAGE.equals(pkg)) {
             captureAssistantContext(event);
+
+            // If Katniss emits another visible response event immediately after we
+            // already redirected a YouTube request, dismiss that response surface too.
+            long now = SystemClock.elapsedRealtime();
+            if (lastAssistantRedirectMs > 0
+                    && now - lastAssistantRedirectMs >= 120
+                    && now - lastAssistantRedirectMs <= 1800
+                    && (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                        || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
+                Log.i(TAG, "Suppressing post-redirect Assistant response");
+                performGlobalAction(GLOBAL_ACTION_BACK);
+                handler.postDelayed(this::bringModTaskToFront, 120);
+            }
             return;
         }
 
