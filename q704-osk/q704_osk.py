@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import gi
@@ -136,19 +138,12 @@ def current_wallpaper():
                     return str(found)
     return None
 
-def css_for(wallpaper):
-    bg = ""
-    if wallpaper:
-        esc = wallpaper.replace("\\", "\\\\").replace('"', '\\"')
-        bg = (
-            f'background-image: url("file://{esc}"); '
-            'background-size: cover; background-position: center;'
-        )
-    return f"""
-    window.q704-keyboard {{
-        {bg}
+def css_for(_wallpaper=None):
+    return """
+    window.q704-keyboard {
+        background-image: none;
         background-color: rgba(62, 24, 45, 0.98);
-    }}
+    }
     .keyboard-panel {{
         background-color: rgba(70, 28, 51, 0.90);
         border-radius: 22px 22px 0 0;
@@ -223,8 +218,10 @@ class KeyboardApp:
         self.keyboard.set_skip_pager_hint(True)
         self.keyboard.set_accept_focus(False)
         self.keyboard.set_focus_on_map(False)
-        self.keyboard.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        self.keyboard.set_gravity(Gdk.Gravity.SOUTH_WEST)
+        # DOCK made GNOME/Zorin relocate the window unpredictably. Keep it
+        # utility-like and force its X11 geometry ourselves.
+        self.keyboard.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        self.keyboard.set_gravity(Gdk.Gravity.NORTH_WEST)
         self.keyboard.connect("delete-event", self.on_hide)
         self.keyboard.connect("map-event", self.on_keyboard_mapped)
 
@@ -252,9 +249,14 @@ class KeyboardApp:
         self.indicator = None
         self.setup_panel_indicator()
 
-        GLib.timeout_add(1200, self.keep_positioned)
+        self.fcitx_monitor = None
+        self.fcitx_thread = None
+        self.fcitx_focus = False
+
+        GLib.timeout_add(800, self.keep_positioned)
         GLib.idle_add(self.setup_accessibility_watcher)
-        GLib.timeout_add(700, self.poll_focused_editable)
+        GLib.timeout_add(900, self.poll_focused_editable)
+        GLib.idle_add(self.start_fcitx_monitor)
 
     def show_fatal(self, ex):
         dialog = Gtk.MessageDialog(
@@ -337,6 +339,11 @@ class KeyboardApp:
     def quit_app(self, *_):
         self.hide_keyboard()
         try:
+            if self.fcitx_monitor:
+                self.fcitx_monitor.terminate()
+        except Exception:
+            pass
+        try:
             self.backend.close()
         except Exception:
             pass
@@ -344,20 +351,49 @@ class KeyboardApp:
 
     def keep_positioned(self):
         if self.keyboard.get_visible():
-            self.position_keyboard()
+            self.force_x11_geometry()
         return True
 
     def position_keyboard(self):
         _geo, work = self.monitor_info()
         width, height = self.keyboard_dimensions()
         self.keyboard_height = height
+        x = work.x
+        y = work.y + work.height - height
+        self.keyboard.set_default_size(width, height)
         self.keyboard.resize(width, height)
-        # Anchor above the Zorin panel/taskbar, never underneath it.
-        self.keyboard.move(work.x, work.y + work.height - height)
+        self.keyboard.move(x, y)
+        return x, y, width, height
 
     def on_keyboard_mapped(self, *_):
-        self.position_keyboard()
-        GLib.timeout_add(80, self.apply_bottom_strut)
+        GLib.timeout_add(40, self.force_x11_geometry)
+        GLib.timeout_add(180, self.force_x11_geometry)
+        return False
+
+    def force_x11_geometry(self):
+        if not self.keyboard.get_visible():
+            return False
+
+        x, y, width, height = self.position_keyboard()
+        xid = self.x11_window_id()
+        if not xid:
+            return False
+
+        try:
+            subprocess.run(
+                ["wmctrl", "-ir", str(xid), "-b", "add,above,skip_taskbar,skip_pager"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                ["wmctrl", "-ir", str(xid), "-e", f"0,{x},{y},{width},{height}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
         return False
 
     def x11_window_id(self):
@@ -375,51 +411,12 @@ class KeyboardApp:
                 return None
 
     def apply_bottom_strut(self):
-        xid = self.x11_window_id()
-        if not xid or not self.keyboard.get_visible():
-            return False
-
-        geo, work = self.monitor_info()
-        height = self.keyboard_height or self.keyboard_dimensions()[1]
-        keyboard_top = work.y + work.height - height
-        # Bottom strut is measured from the physical monitor bottom. Include
-        # the Zorin panel height so maximized apps stay above panel + keyboard.
-        bottom_reserve = max(height, (geo.y + geo.height) - keyboard_top)
-        start_x = max(0, work.x)
-        end_x = max(start_x, work.x + work.width - 1)
-
-        try:
-            subprocess.run([
-                "xprop", "-id", str(xid),
-                "-f", "_NET_WM_STRUT", "32c",
-                "-set", "_NET_WM_STRUT",
-                f"0, 0, 0, {bottom_reserve}",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            subprocess.run([
-                "xprop", "-id", str(xid),
-                "-f", "_NET_WM_STRUT_PARTIAL", "32c",
-                "-set", "_NET_WM_STRUT_PARTIAL",
-                f"0, 0, 0, {bottom_reserve}, 0, 0, 0, 0, 0, 0, {start_x}, {end_x}",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        except Exception:
-            pass
+        # Disabled in V1.3: applying STRUT to the keyboard itself made
+        # GNOME/Zorin move the keyboard to the wrong edge.
         return False
 
     def clear_bottom_strut(self):
-        xid = self.x11_window_id()
-        if not xid:
-            return
-        try:
-            subprocess.run(
-                ["xprop", "-id", str(xid), "-remove", "_NET_WM_STRUT"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-            )
-            subprocess.run(
-                ["xprop", "-id", str(xid), "-remove", "_NET_WM_STRUT_PARTIAL"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-            )
-        except Exception:
-            pass
+        return
 
     def show_keyboard(self):
         if self.hide_timer:
@@ -428,15 +425,15 @@ class KeyboardApp:
             except Exception:
                 pass
             self.hide_timer = None
+        self.position_keyboard()
         if not self.keyboard.get_visible():
             self.keyboard.show_all()
-        self.position_keyboard()
-        GLib.timeout_add(80, self.apply_bottom_strut)
+        GLib.timeout_add(40, self.force_x11_geometry)
+        GLib.timeout_add(180, self.force_x11_geometry)
         return False
 
     def hide_keyboard(self):
         if self.keyboard.get_visible():
-            self.clear_bottom_strut()
             self.keyboard.hide()
         return False
 
@@ -449,6 +446,58 @@ class KeyboardApp:
     def on_hide(self, *_):
         self.hide_keyboard()
         return True
+
+    def start_fcitx_monitor(self):
+        if self.fcitx_thread and self.fcitx_thread.is_alive():
+            return False
+
+        self.fcitx_thread = threading.Thread(
+            target=self._fcitx_monitor_loop,
+            name="q704-fcitx-monitor",
+            daemon=True,
+        )
+        self.fcitx_thread.start()
+        return False
+
+    def _fcitx_monitor_loop(self):
+        while True:
+            try:
+                proc = subprocess.Popen(
+                    [
+                        "dbus-monitor",
+                        "--session",
+                        "interface='org.fcitx.Fcitx.InputContext1'",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                self.fcitx_monitor = proc
+
+                for raw in proc.stdout:
+                    line = raw.strip()
+                    if "member=FocusIn" in line:
+                        self.fcitx_focus = True
+                        GLib.idle_add(self.show_keyboard)
+                    elif "member=FocusOut" in line or "member=NotifyFocusOut" in line:
+                        self.fcitx_focus = False
+                        GLib.timeout_add(260, self.hide_after_fcitx_focusout)
+                    elif "member=SetCursorRect" in line and not self.keyboard.get_visible():
+                        # Some clients update cursor geometry before/without a
+                        # visible FocusIn line. This is still a strong signal
+                        # that an input context is active.
+                        self.fcitx_focus = True
+                        GLib.idle_add(self.show_keyboard)
+
+                proc.wait(timeout=1)
+            except Exception:
+                time.sleep(1.0)
+
+    def hide_after_fcitx_focusout(self):
+        if not self.fcitx_focus:
+            self.hide_keyboard()
+        return False
 
     def setup_accessibility_watcher(self):
         if pyatspi is None:
