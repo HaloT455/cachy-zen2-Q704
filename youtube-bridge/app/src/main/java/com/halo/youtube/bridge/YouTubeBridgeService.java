@@ -31,6 +31,7 @@ public class YouTubeBridgeService extends AccessibilityService {
     private long lastLaunchMs = 0L;
     private long lastOfficialRedirectMs = 0L;
     private long lastAssistantRedirectMs = 0L;
+    private long lastPlayStoreRedirectMs = 0L;
 
     private String lastAssistantUtterance = "";
     private long lastAssistantUtteranceMs = 0L;
@@ -133,26 +134,34 @@ public class YouTubeBridgeService extends AccessibilityService {
         // command. This avoids depending on Play Store's accessibility tree loading.
         if (PLAY_STORE.equals(pkg)) {
             long now = SystemClock.elapsedRealtime();
-            String query = getRecentAssistantQuery(now);
 
-            if (!query.isEmpty()) {
-                lastAssistantRedirectMs = now;
-                Log.i(TAG, "Play Store intercepted; dismissing it, query=" + query);
-
-                // Remove the Play Store task from the visible stack first. On BRAVIA,
-                // Assistant may open Play Store even though the mod is already launched.
-                performGlobalAction(GLOBAL_ACTION_BACK);
-
-                final String q = query;
-                handler.postDelayed(() -> launchModSearch(q), 140);
+            // One Assistant request can generate several Play Store accessibility
+            // events. Redirect only once so we never dispatch the same YouTube
+            // deep-link four times.
+            if (lastPlayStoreRedirectMs > 0 && now - lastPlayStoreRedirectMs < 2500) {
                 return;
             }
 
-            // Fallback for cases where Katniss transcript arrives slightly later.
+            String query = getRecentAssistantQuery(now);
+            if (!query.isEmpty()) {
+                lastPlayStoreRedirectMs = now;
+                lastAssistantRedirectMs = now;
+                Log.i(TAG, "Play Store intercepted once; query=" + query);
+                performGlobalAction(GLOBAL_ACTION_BACK);
+
+                final String q = query;
+                handler.postDelayed(() -> launchModSearch(q), 120);
+                return;
+            }
+
+            // Do not fall back to YouTube home immediately. On BRAVIA the final
+            // recognition AccessibilityEvent can arrive after Play Store opens.
             handler.removeCallbacks(checkPlayStoreRunnable);
-            handler.postDelayed(checkPlayStoreRunnable, 250);
-            handler.postDelayed(checkPlayStoreRetryRunnable, 650);
-            handler.postDelayed(checkPlayStoreRetry2Runnable, 1200);
+            handler.removeCallbacks(checkPlayStoreRetryRunnable);
+            handler.removeCallbacks(checkPlayStoreRetry2Runnable);
+            handler.postDelayed(checkPlayStoreRunnable, 180);
+            handler.postDelayed(checkPlayStoreRetryRunnable, 500);
+            handler.postDelayed(checkPlayStoreRetry2Runnable, 1000);
             return;
         }
 
@@ -191,26 +200,37 @@ public class YouTubeBridgeService extends AccessibilityService {
 
         // A clicked Assistant result is more specific than the spoken command.
         if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            String clicked = bestTextFromEvent(event, false);
+            String clicked = bestEventLocalText(event, false);
             if (isUsefulClickedText(clicked)) {
                 lastAssistantClickedText = clicked.trim();
                 lastAssistantClickedTextMs = now;
+                Log.i(TAG, "Katniss clicked result=" + lastAssistantClickedText);
             }
         }
 
         // Remember the user's current voice query even if it does not contain
         // "YouTube". This supports flows such as saying "karaoke chân ái",
         // reviewing Assistant's video results, then selecting one.
-        String anySpoken = bestTextFromEvent(event, false);
-        if (isUsefulSpokenQuery(anySpoken)) {
+        String anySpoken = bestEventLocalText(event, false);
+        if (isUsefulSpokenQuery(anySpoken)
+                && (event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                    || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
             rememberGenericVoiceCandidate(anySpoken, now);
+        } else if (!lastAssistantAnyUtterance.isEmpty()
+                && now - lastAssistantAnyUtteranceMs <= 1800) {
+            // Only use a tree scan to extend an already-started recognition phrase.
+            // Never allow a results page to create a brand-new "voice" query.
+            String extension = bestTextFromEvent(event, false);
+            if (isUsefulSpokenQuery(extension)) {
+                rememberGenericVoiceCandidate(extension, now);
+            }
         }
 
         // Explicit YouTube auto-launch must come from the current accessibility
         // event/source only. Never scan the whole Assistant results tree here:
         // labels such as "YouTube videos" are UI chrome, not the user's speech.
         String spoken = bestEventLocalText(event, true);
-        if (isExplicitYoutubeVoiceCommand(spoken)) {
+        if (isExplicitYoutubeVoiceCommand(spoken) || isBareYoutubeOpenCommand(spoken)) {
             lastAssistantUtterance = spoken.trim();
             lastAssistantUtteranceMs = now;
 
@@ -239,6 +259,24 @@ public class YouTubeBridgeService extends AccessibilityService {
         }
 
         return best;
+    }
+
+    private boolean isBareYoutubeOpenCommand(String value) {
+        if (value == null) return false;
+        String raw = value.trim();
+        if (raw.isEmpty()) return false;
+
+        String lower = raw.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").trim();
+        if (!lower.contains("youtube")) return false;
+
+        if (lower.equals("youtube")
+                || lower.equals("mở youtube")
+                || lower.equals("phát youtube")
+                || lower.equals("xem youtube")
+                || lower.equals("open youtube")) {
+            return true;
+        }
+        return false;
     }
 
     private boolean isExplicitYoutubeVoiceCommand(String value) {
@@ -407,17 +445,16 @@ public class YouTubeBridgeService extends AccessibilityService {
             if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
         }
 
-        // Next prefer the original spoken query even when it did not say YouTube.
-        // This prevents Assistant section labels such as "Videos" from replacing
-        // a query like "karaoke chân ái" after the user selects a video result.
-        if (!lastAssistantAnyUtterance.isEmpty() && now - lastAssistantAnyUtteranceMs <= 15000) {
-            String q = sanitizeQuery(lastAssistantAnyUtterance);
+        // For generic Assistant searches, a freshly clicked video/result is the
+        // most specific target and is available immediately on the first attempt.
+        if (!lastAssistantClickedText.isEmpty() && now - lastAssistantClickedTextMs <= 6000) {
+            String q = sanitizeQuery(lastAssistantClickedText);
             if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
         }
 
-        // Last resort: clicked result text, but never generic UI labels.
-        if (!lastAssistantClickedText.isEmpty() && now - lastAssistantClickedTextMs <= 6000) {
-            String q = sanitizeQuery(lastAssistantClickedText);
+        // Otherwise use the original spoken query even when it did not say YouTube.
+        if (!lastAssistantAnyUtterance.isEmpty() && now - lastAssistantAnyUtteranceMs <= 15000) {
+            String q = sanitizeQuery(lastAssistantAnyUtterance);
             if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
         }
 
@@ -509,20 +546,20 @@ public class YouTubeBridgeService extends AccessibilityService {
 
     private void redirectFromPlayStoreIfNeeded() {
         long now = SystemClock.elapsedRealtime();
-        String query = getRecentAssistantQuery(now);
-        if (!query.isEmpty()) {
-            lastAssistantRedirectMs = now;
-            Log.i(TAG, "Delayed Play Store redirect query=" + query);
-            performGlobalAction(GLOBAL_ACTION_BACK);
-            final String q = query;
-            handler.postDelayed(() -> launchModSearch(q), 140);
+
+        if (lastPlayStoreRedirectMs > 0 && now - lastPlayStoreRedirectMs < 2500) {
             return;
         }
 
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root != null && treeContainsYouTube(root)) {
-            Log.i(TAG, "Play Store YouTube page detected -> mod home");
-            launchModHome();
+        String query = getRecentAssistantQuery(now);
+        if (!query.isEmpty()) {
+            lastPlayStoreRedirectMs = now;
+            lastAssistantRedirectMs = now;
+            Log.i(TAG, "Delayed Play Store redirect once; query=" + query);
+            performGlobalAction(GLOBAL_ACTION_BACK);
+
+            final String q = query;
+            handler.postDelayed(() -> launchModSearch(q), 120);
         }
     }
 
