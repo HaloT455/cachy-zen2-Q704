@@ -46,6 +46,7 @@ jobs:
           mkdir -p "$PKGROOT/usr/bin"
           mkdir -p "$PKGROOT/usr/lib/q704-zorin-keyboard"
           mkdir -p "$PKGROOT/usr/share/applications"
+          mkdir -p "$PKGROOT/usr/share/icons/hicolor/scalable/apps"
           mkdir -p "$PKGROOT/etc/xdg/autostart"
           mkdir -p "$PKGROOT/etc/udev/rules.d"
           mkdir -p "$PKGROOT/etc/modules-load.d"
@@ -55,6 +56,8 @@ jobs:
           install -m 0755 q704-osk/q704-zorin-keyboard             "$PKGROOT/usr/bin/q704-zorin-keyboard"
 
           install -m 0644 q704-osk/q704-zorin-keyboard.desktop             "$PKGROOT/usr/share/applications/q704-zorin-keyboard.desktop"
+
+          install -m 0644 q704-osk/q704-keyboard-pink.svg             "$PKGROOT/usr/share/icons/hicolor/scalable/apps/q704-keyboard-pink.svg"
 
           install -m 0644 q704-osk/q704-zorin-keyboard-autostart.desktop             "$PKGROOT/etc/xdg/autostart/q704-zorin-keyboard.desktop"
 
