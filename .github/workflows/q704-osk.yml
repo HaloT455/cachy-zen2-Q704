@@ -37,44 +37,30 @@ jobs:
           PKGROOT="$PWD/pkgroot"
 
           rm -rf "$PKGROOT" artifacts
-          mkdir -p             "$PKGROOT/DEBIAN"             "$PKGROOT/usr/bin"             "$PKGROOT/usr/lib/q704-zorin-keyboard"             "$PKGROOT/usr/share/applications"             "$PKGROOT/etc/xdg/autostart"             "$PKGROOT/etc/udev/rules.d"             "$PKGROOT/etc/modules-load.d"
+          mkdir -p "$PKGROOT/DEBIAN"
+          mkdir -p "$PKGROOT/usr/bin"
+          mkdir -p "$PKGROOT/usr/lib/q704-zorin-keyboard"
+          mkdir -p "$PKGROOT/usr/share/applications"
+          mkdir -p "$PKGROOT/etc/xdg/autostart"
+          mkdir -p "$PKGROOT/etc/udev/rules.d"
+          mkdir -p "$PKGROOT/etc/modules-load.d"
 
-          install -m 0755 q704-osk/q704_osk.py             "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_osk.py"
+          install -m 0755 q704-osk/q704_osk.py "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_osk.py"
+          install -m 0755 q704-osk/q704-zorin-keyboard "$PKGROOT/usr/bin/q704-zorin-keyboard"
+          install -m 0644 q704-osk/q704-zorin-keyboard.desktop "$PKGROOT/usr/share/applications/q704-zorin-keyboard.desktop"
+          install -m 0644 q704-osk/q704-zorin-keyboard-autostart.desktop "$PKGROOT/etc/xdg/autostart/q704-zorin-keyboard.desktop"
+          install -m 0644 q704-osk/80-q704-uinput.rules "$PKGROOT/etc/udev/rules.d/80-q704-uinput.rules"
+          printf '%s\n' uinput > "$PKGROOT/etc/modules-load.d/q704-zorin-keyboard.conf"
 
-          install -m 0755 q704-osk/q704-zorin-keyboard             "$PKGROOT/usr/bin/q704-zorin-keyboard"
-
-          install -m 0644 q704-osk/q704-zorin-keyboard.desktop             "$PKGROOT/usr/share/applications/q704-zorin-keyboard.desktop"
-
-          install -m 0644 q704-osk/q704-zorin-keyboard-autostart.desktop             "$PKGROOT/etc/xdg/autostart/q704-zorin-keyboard.desktop"
-
-          install -m 0644 q704-osk/80-q704-uinput.rules             "$PKGROOT/etc/udev/rules.d/80-q704-uinput.rules"
-
-          printf 'uinput\n' > "$PKGROOT/etc/modules-load.d/q704-zorin-keyboard.conf"
-
-          cat > "$PKGROOT/DEBIAN/control" <<EOF
-Package: q704-zorin-keyboard
-Version: $VER
-Section: utils
-Priority: optional
-Architecture: all
-Depends: python3, python3-gi, python3-evdev, gir1.2-gtk-3.0
-Recommends: xwayland
-Maintainer: HaloT455 <noreply@github.com>
-Description: Zorin-themed touch keyboard for Fujitsu Stylistic Q704
- Uses Linux uinput so Chrome, GTK, Qt and other applications receive
- real keyboard events on both X11 and Wayland sessions.
-EOF
+          printf '%s\n'             "Package: q704-zorin-keyboard"             "Version: $VER"             "Section: utils"             "Priority: optional"             "Architecture: all"             "Depends: python3, python3-gi, python3-evdev, gir1.2-gtk-3.0"             "Recommends: xwayland"             "Maintainer: HaloT455 <noreply@github.com>"             "Description: Zorin-themed touch keyboard for Fujitsu Stylistic Q704"             " Uses Linux uinput so Chrome, GTK, Qt and other applications receive"             " real keyboard events on both X11 and Wayland sessions."             > "$PKGROOT/DEBIAN/control"
 
           install -m 0755 q704-osk/postinst "$PKGROOT/DEBIAN/postinst"
 
-          cat > "$PKGROOT/DEBIAN/prerm" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
+          printf '%s\n' '#!/bin/sh' 'exit 0' > "$PKGROOT/DEBIAN/prerm"
           chmod 0755 "$PKGROOT/DEBIAN/prerm"
 
           mkdir -p artifacts
-          dpkg-deb --build --root-owner-group             "$PKGROOT"             "artifacts/q704-zorin-keyboard_${VER}_all.deb"
+          dpkg-deb --build --root-owner-group "$PKGROOT" "artifacts/q704-zorin-keyboard_${VER}_all.deb"
 
           dpkg-deb --info "artifacts/q704-zorin-keyboard_${VER}_all.deb"
           dpkg-deb --contents "artifacts/q704-zorin-keyboard_${VER}_all.deb"
