@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YouTube Bridge</string>
+    <string name="service_description">Redirects the Sony YouTube remote key and official YouTube launches to the patched YouTube TV app.</string>
+</resources>
