@@ -34,6 +34,19 @@ public class YouTubeBridgeService extends AccessibilityService {
     private String lastAssistantClickedText = "";
     private long lastAssistantClickedTextMs = 0L;
 
+    private final Runnable directAssistantLaunchRunnable = new Runnable() {
+        @Override
+        public void run() {
+            long now = SystemClock.elapsedRealtime();
+            String query = getRecentAssistantQuery(now);
+            if (query.isEmpty()) {
+                launchModHome();
+            } else {
+                launchModSearch(query);
+            }
+        }
+    };
+
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         if (event.getKeyCode() == KEYCODE_VIDEO_APP_3) {
@@ -98,6 +111,12 @@ public class YouTubeBridgeService extends AccessibilityService {
         if (!spoken.isEmpty() && spoken.toLowerCase(Locale.ROOT).contains("youtube")) {
             lastAssistantUtterance = spoken.trim();
             lastAssistantUtteranceMs = now;
+
+            // Direct fallback for TVs where Assistant reports "no supporting app"
+            // when the Google-signed YouTube package is absent for user 0.
+            // Debounce transcription updates; the last (final/longest) phrase wins.
+            handler.removeCallbacks(directAssistantLaunchRunnable);
+            handler.postDelayed(directAssistantLaunchRunnable, 700);
         }
     }
 
