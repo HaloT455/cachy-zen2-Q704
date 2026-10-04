@@ -27,18 +27,19 @@ jobs:
           sudo apt-get install -y \
             python3 python3-gi python3-evdev python3-pyatspi \
             gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
-            x11-utils wmctrl dbus-bin dpkg-dev
+            dpkg-dev
 
       - name: Validate Python and AT-SPI
         run: |
           python3 -m py_compile q704-osk/q704_osk.py
+          python3 -m py_compile q704-osk/q704_focusd.py
           python3 -c 'import pyatspi; print("AT-SPI OK")'
           python3 -c 'import gi; gi.require_version("AyatanaAppIndicator3","0.1"); from gi.repository import AyatanaAppIndicator3; print("AppIndicator OK")'
 
       - name: Build Debian package
         run: |
           set -e
-          VER="1.3.2"
+          VER="1.4.0"
           PKGROOT="$PWD/pkgroot"
 
           rm -rf "$PKGROOT" artifacts
@@ -52,6 +53,8 @@ jobs:
           mkdir -p "$PKGROOT/etc/modules-load.d"
 
           install -m 0755 q704-osk/q704_osk.py             "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_osk.py"
+
+          install -m 0755 q704-osk/q704_focusd.py             "$PKGROOT/usr/lib/q704-zorin-keyboard/q704_focusd.py"
 
           install -m 0755 q704-osk/q704-zorin-keyboard             "$PKGROOT/usr/bin/q704-zorin-keyboard"
 
@@ -71,11 +74,11 @@ jobs:
             echo "Section: utils"
             echo "Priority: optional"
             echo "Architecture: all"
-            echo "Depends: python3, python3-gi, python3-evdev, python3-pyatspi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, x11-utils, wmctrl, dbus-bin"
+            echo "Depends: python3, python3-gi, python3-evdev, python3-pyatspi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1"
             echo "Recommends: xwayland"
             echo "Maintainer: HaloT455 <noreply@github.com>"
             echo "Description: Zorin-themed touch keyboard for Fujitsu Stylistic Q704"
-            echo " Auto-opens from Fcitx5 focus events with AT-SPI fallback, emits real keyboard"
+            echo " Stable V1 core with isolated AT-SPI focus watcher and real keyboard"
             echo " events through uinput, and docks to the bottom of the screen."
           } > "$PKGROOT/DEBIAN/control"
 
@@ -95,6 +98,6 @@ jobs:
       - name: Upload Q704 keyboard
         uses: actions/upload-artifact@v4
         with:
-          name: q704-zorin-keyboard-v1.3.2-deb
+          name: q704-zorin-keyboard-v1-core-1.4.0-deb
           path: artifacts/*
           retention-days: 30
