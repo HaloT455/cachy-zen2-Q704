@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Q704 Zorin Keyboard
+Comment=Start Q704 touch keyboard handle
+Exec=env GDK_BACKEND=x11 /usr/bin/q704-zorin-keyboard
+Icon=input-keyboard
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
