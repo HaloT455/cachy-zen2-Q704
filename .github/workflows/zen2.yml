@@ -1,35 +1,30 @@
-name: Build CachyOS Zen2 EEVDF Kernel
+name: Build Q704 CachyOS Haswell EEVDF Kernel
 
 on:
   workflow_dispatch:
     inputs:
       kernel_ref:
-        description: "CachyOS/linux branch or tag to build (e.g. cachyos-7.1.8-1)"
+        description: "CachyOS/linux tag or branch"
         required: false
-        default: ""
+        default: "cachyos-7.2.8-1"
   push:
     branches:
-      - master
-    tags:
-      - "cachyos-*"
+      - main
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   KERNEL_REPO: https://github.com/CachyOS/linux.git
-  KERNEL_REF_DEFAULT: master
-
+  KERNEL_REF_DEFAULT: cachyos-7.2.8-1
   CONFIG_URL: https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos-eevdf/config
-
-  KERNEL_SUFFIX: "-cachyos-zen2-eevdf"
+  KERNEL_SUFFIX: "-cachyos-q704-haswell-eevdf"
   LLVM_VERSION: "23.1.2"
   LLVM_DIR: "/opt/llvm"
 
 jobs:
-
   build:
-    name: Build kernel
+    name: Build Q704 Haswell kernel
     runs-on: ubuntu-24.04
 
     env:
@@ -40,11 +35,7 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.kernel_ref }}
         run: |
-          # A tag pushed to this repo must have the same name as the tag in
-          # CachyOS/linux (e.g. cachyos-7.1.8-1) and builds exactly that tag.
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            REF="${GITHUB_REF_NAME}"
-          elif [ -n "${INPUT_REF}" ]; then
+          if [ -n "${INPUT_REF}" ]; then
             REF="${INPUT_REF}"
           else
             REF="${KERNEL_REF_DEFAULT}"
@@ -67,29 +58,9 @@ jobs:
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            cpio \
-            flex \
-            fakeroot \
-            libelf-dev \
-            libssl-dev \
-            libdw-dev \
-            dwarves \
-            gettext \
-            git \
-            kmod \
-            libncurses-dev \
-            openssl \
-            pahole \
-            perl \
-            python3 \
-            rsync \
-            tar \
-            xz-utils \
-            zstd \
-            curl
+            bc bison build-essential cpio flex fakeroot \
+            libelf-dev libssl-dev libdw-dev dwarves gettext git kmod \
+            libncurses-dev openssl pahole perl python3 rsync tar xz-utils zstd curl
 
       - name: Install LLVM
         run: |
@@ -113,25 +84,7 @@ jobs:
           clang --version
           ld.lld --version
 
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal
-
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:${PATH}"
-
-          rustup component add rust-src
-
-          rustc --version
-          cargo --version
-
-      - name: Install bindgen
-        run: |
-          cargo install bindgen-cli
-          bindgen --version
-
-      - name: Checkout kernel
+      - name: Checkout CachyOS kernel
         run: |
           git clone \
             --depth=1 \
@@ -146,87 +99,145 @@ jobs:
         run: |
           curl -fL "${CONFIG_URL}" -o .config
 
-      - name: Configure kernel
+      - name: Configure Q704 Haswell kernel
         working-directory: kernel
         run: |
-          # CPU target: MZEN2 only exists when the CPU-optimization patch is applied.
-          # Otherwise fall back to GENERIC_CPU + -march=znver2.
+          # Q704: Intel Core i3-4010U, Haswell, 2C/4T.
+          # Never use -march=native here because GitHub runners use another CPU.
           scripts/config --disable X86_NATIVE_CPU || true
-          if grep -q '^config MZEN2' arch/x86/Kconfig.cpu; then
-            echo "MZEN2 available, using it"
+          scripts/config --disable MNATIVE_INTEL || true
+          scripts/config --disable MNATIVE_AMD || true
+          scripts/config --disable MZEN || true
+          scripts/config --disable MZEN2 || true
+          scripts/config --disable MZEN3 || true
+          scripts/config --disable MZEN4 || true
+          scripts/config --disable MZEN5 || true
+
+          if grep -q '^config MHASWELL' arch/x86/Kconfig.cpu; then
+            echo "CONFIG_MHASWELL available"
             scripts/config --disable GENERIC_CPU
-            scripts/config --enable MZEN2
+            scripts/config --enable MHASWELL
             echo "CPU_CFLAGS=" >> "$GITHUB_ENV"
           else
-            echo "MZEN2 not available, using GENERIC_CPU with -march=znver2"
+            echo "CONFIG_MHASWELL unavailable -> GENERIC_CPU + -march=haswell"
             scripts/config --enable GENERIC_CPU
-            echo "CPU_CFLAGS=-march=znver2" >> "$GITHUB_ENV"
+            echo "CPU_CFLAGS=-march=haswell -mtune=haswell" >> "$GITHUB_ENV"
           fi
 
-          # ThinLTO (Full LTO is likely to OOM or time out on hosted runners)
-          scripts/config --disable LTO_NONE
-          scripts/config --disable LTO_CLANG_FULL
-          scripts/config --enable LTO_CLANG_THIN
+          # EEVDF / low-latency desktop scheduling
+          scripts/config --disable SCHED_BORE || true
+          scripts/config --enable PREEMPT_BUILD || true
+          scripts/config --disable PREEMPT_NONE || true
+          scripts/config --disable PREEMPT_VOLUNTARY || true
+          scripts/config --enable PREEMPT || true
+          scripts/config --enable PREEMPT_COUNT || true
+          scripts/config --enable PREEMPTION || true
+          scripts/config --enable PREEMPT_DYNAMIC || true
 
-          # -O3 option only exists with the CachyOS patches
+          # 300 Hz + tickless idle: good balance for this 15 W Haswell tablet
+          scripts/config --disable HZ_100 || true
+          scripts/config --disable HZ_250 || true
+          scripts/config --enable HZ_300 || true
+          scripts/config --disable HZ_500 || true
+          scripts/config --disable HZ_600 || true
+          scripts/config --disable HZ_750 || true
+          scripts/config --disable HZ_1000 || true
+          scripts/config --set-val HZ 300
+          scripts/config --disable HZ_PERIODIC || true
+          scripts/config --disable NO_HZ_FULL || true
+          scripts/config --enable NO_HZ_IDLE || true
+          scripts/config --enable NO_HZ || true
+          scripts/config --enable NO_HZ_COMMON || true
+
+          # MGLRU, small CPU topology
+          scripts/config --enable LRU_GEN || true
+          scripts/config --enable LRU_GEN_ENABLED || true
+          scripts/config --disable LRU_GEN_STATS || true
+          scripts/config --disable NUMA || true
+          scripts/config --set-val NR_CPUS 8
+
+          # O3 + ThinLTO
           if grep -rq 'CC_OPTIMIZE_FOR_PERFORMANCE_O3' init/Kconfig; then
-            scripts/config --disable CC_OPTIMIZE_FOR_PERFORMANCE
+            scripts/config --disable CC_OPTIMIZE_FOR_PERFORMANCE || true
             scripts/config --enable CC_OPTIMIZE_FOR_PERFORMANCE_O3
-          else
-            echo "O3 option not available, keeping default"
           fi
+          scripts/config --disable LTO_NONE || true
+          scripts/config --disable LTO_CLANG_FULL || true
+          scripts/config --enable LTO_CLANG_THIN || true
 
-          # Disable debug info and BTF to save disk space and build time
-          scripts/config --enable DEBUG_INFO_NONE
-          scripts/config --disable DEBUG_INFO_BTF
-          scripts/config --disable DEBUG_INFO_BTF_MODULES
+          # No Rust is needed for the Q704 drivers; saves build setup/time.
+          scripts/config --disable RUST || true
 
+          # Keep build size reasonable.
+          scripts/config --enable DEBUG_INFO_NONE || true
+          scripts/config --disable DEBUG_INFO || true
+          scripts/config --disable DEBUG_INFO_BTF || true
+          scripts/config --disable DEBUG_INFO_BTF_MODULES || true
+          scripts/config --set-str SYSTEM_TRUSTED_KEYS "" || true
+          scripts/config --set-str SYSTEM_REVOCATION_KEYS "" || true
+
+          # Q704 critical hardware.
+          scripts/config --enable BT || true
+          scripts/config --module BT_HCIBTUSB || true
+          scripts/config --module BT_INTEL || true
+          scripts/config --disable BT_HCIBTUSB_AUTOSUSPEND || true
+
+          scripts/config --module IWLWIFI || true
+          scripts/config --module IWLMVM || true
+
+          scripts/config --module FUJITSU_LAPTOP || true
+          scripts/config --module HID_WACOM || true
+
+          scripts/config --enable USB_XHCI_HCD || true
+          scripts/config --enable USB_XHCI_PCI || true
+          scripts/config --enable USB_EHCI_HCD || true
+          scripts/config --enable USB_EHCI_PCI || true
+
+          # Keep Intel graphics / UVC / common HID and storage from the base config.
           scripts/config --set-str LOCALVERSION "${KERNEL_SUFFIX}"
           scripts/config --disable LOCALVERSION_AUTO
 
           make LLVM=1 olddefconfig
 
-          echo "===== CPU CONFIG ====="
-          grep -E '^CONFIG_(GENERIC_CPU|MZEN|MZEN2|MZEN3|MZEN4|MNATIVE_AMD|MNATIVE_INTEL|X86_NATIVE_CPU)=' .config || true
+          echo "===== CPU ====="
+          grep -E '^CONFIG_(MHASWELL|GENERIC_CPU|MZEN|MZEN2|MZEN3|MZEN4|MNATIVE_AMD|MNATIVE_INTEL|X86_NATIVE_CPU)=' .config || true
+          echo "CPU_CFLAGS=${CPU_CFLAGS}"
 
-          echo "===== SCHEDULER ====="
-          grep -E '^CONFIG_(SCHED_|PREEMPT|HZ_)' .config | head -100 || true
-
-          echo "===== AMD PSTATE ====="
-          grep -E '^CONFIG_X86_AMD_PSTATE' .config || true
-
-          echo "===== LTO / OPT ====="
-          grep -E '^CONFIG_(LTO_CLANG|LTO_CLANG_FULL|LTO_CLANG_THIN|CC_OPTIMIZE_FOR_PERFORMANCE)' .config || true
+          echo "===== Q704 CONFIG ====="
+          grep -E '^CONFIG_(PREEMPT|PREEMPT_DYNAMIC|HZ_300|LRU_GEN|LTO_CLANG_THIN|CC_OPTIMIZE_FOR_PERFORMANCE_O3|BT_INTEL|BT_HCIBTUSB|IWLWIFI|IWLMVM|HID_WACOM|USB_XHCI_HCD|USB_EHCI_HCD|FUJITSU_LAPTOP)=' .config || true
+          grep '^CONFIG_HZ=' .config || true
 
           echo "===== VERIFY ====="
-          grep -q '^CONFIG_MZEN2=y' .config || grep -q '^CONFIG_GENERIC_CPU=y' .config \
-            || { echo "No valid CPU target selected"; exit 1; }
+          grep -q '^CONFIG_MHASWELL=y' .config || grep -q '^CONFIG_GENERIC_CPU=y' .config \
+            || { echo "No valid Haswell-compatible CPU target"; exit 1; }
           grep -q '^CONFIG_CC_IS_CLANG=y' .config || { echo "Kernel is not configured for clang"; exit 1; }
-          grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo "LTO_CLANG_THIN not enabled"; exit 1; }
+          grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo "ThinLTO not enabled"; exit 1; }
+          grep -q '^CONFIG_PREEMPT_DYNAMIC=y' .config || { echo "PREEMPT_DYNAMIC not enabled"; exit 1; }
+          grep -q '^CONFIG_HZ_300=y' .config || { echo "HZ_300 not enabled"; exit 1; }
+          grep -q '^CONFIG_LRU_GEN=y' .config || { echo "MGLRU not enabled"; exit 1; }
 
-      - name: Build kernel
+      - name: Build Q704 kernel
         working-directory: kernel
         env:
-          KBUILD_BUILD_USER: github-actions
-          KBUILD_BUILD_HOST: github-actions
+          KBUILD_BUILD_USER: HaloT455
+          KBUILD_BUILD_HOST: github-q704
         run: |
           make -j"$(nproc)" \
             LLVM=1 \
             KCFLAGS="${CPU_CFLAGS} -Wno-default-const-init-var-unsafe"
 
-      - name: Prepare kernel artifacts
+      - name: Prepare kernel files
         working-directory: kernel
         run: |
           KVER="$(make -s LLVM=1 kernelrelease)"
+          echo "KVER=${KVER}" >> "$GITHUB_ENV"
           echo "Kernel release: ${KVER}"
 
           mkdir -p pkgroot/boot
-
           cp arch/x86/boot/bzImage "pkgroot/boot/vmlinuz-${KVER}"
-          cp System.map            "pkgroot/boot/System.map-${KVER}"
-          cp .config               "pkgroot/boot/config-${KVER}"
+          cp System.map "pkgroot/boot/System.map-${KVER}"
+          cp .config "pkgroot/boot/config-${KVER}"
 
-          # Install modules under /usr/lib/modules (Arch and merged-usr Debian/Ubuntu)
           make LLVM=1 \
             INSTALL_MOD_PATH="$PWD/pkgroot/usr" \
             INSTALL_MOD_STRIP=1 \
@@ -237,15 +248,13 @@ jobs:
             "pkgroot/usr/lib/modules/${KVER}/source"
 
           depmod -b "$PWD/pkgroot/usr" "${KVER}"
-
           echo "${KVER}" > pkgroot/kernelrelease
 
           tar --zstd -cf kernel-root.tar.zst -C pkgroot .
-
           ls -lh kernel-root.tar.zst
           du -sh pkgroot
 
-      - name: Prepare kernel headers
+      - name: Prepare Q704 headers
         working-directory: kernel
         run: |
           KVER="$(make -s LLVM=1 kernelrelease)"
@@ -263,37 +272,15 @@ jobs:
           if [ -f arch/x86/kernel/asm-offsets.s ]; then
             install -Dt "${builddir}/arch/x86/kernel" -m644 arch/x86/kernel/asm-offsets.s
           fi
-
-          # Needed to build external modules when objtool / BTF are enabled
           if [ -f tools/objtool/objtool ]; then
             install -Dt "${builddir}/tools/objtool" tools/objtool/objtool
           fi
-          if [ -f tools/bpf/resolve_btfids/resolve_btfids ]; then
-            install -Dt "${builddir}/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
-          fi
 
-          # Private headers that some out-of-tree modules include
-          for f in \
-            drivers/md/*.h \
-            net/mac80211/*.h \
-            drivers/media/i2c/msp3400-driver.h \
-            drivers/media/usb/dvb-usb/*.h \
-            drivers/media/dvb-frontends/*.h \
-            drivers/media/tuners/*.h \
-            drivers/iio/common/hid-sensors/*.h
-          do
-            if [ -f "$f" ]; then
-              install -Dm644 "$f" "${builddir}/${f}"
-            fi
-          done
-
-          # Kconfig files
           find . -path ./hdrroot -prune -o -name 'Kconfig*' -type f -print0 \
             | while IFS= read -r -d '' f; do
-                install -Dm644 "$f" "${builddir}/${f}"
+                install -Dm644 "$f" "${builddir}/$f"
               done
 
-          # Keep only x86
           for d in "${builddir}"/arch/*/; do
             case "$d" in
               */x86/) ;;
@@ -301,7 +288,6 @@ jobs:
             esac
           done
 
-          # Cleanup
           find -L "${builddir}" -type l -delete
           find "${builddir}" -type f -name '*.o' -delete
 
@@ -309,156 +295,66 @@ jobs:
           ln -sr "${builddir}" "${hdr}/usr/src/linux-headers-${KVER}"
 
           tar --zstd -cf headers-root.tar.zst -C "${hdr}" .
-
           ls -lh headers-root.tar.zst
           du -sh "${hdr}"
 
-      - name: Upload kernel build
+      - name: Upload raw Q704 build
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build
+          name: q704-kernel-root
           path: |
             kernel/kernel-root.tar.zst
             kernel/headers-root.tar.zst
           compression-level: 0
 
-  arch:
-    name: Arch Linux package
-    needs:
-      - build
-    runs-on: ubuntu-24.04
-
-    container:
-      image: archlinux:latest
-
-    steps:
-      - name: Install packaging dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed \
-            base-devel \
-            zstd \
-            tar
-
-      - name: Download kernel build
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-build
-          path: build
-
-      - name: Create Arch package
-        run: |
-          mkdir -p package
-          tar --zstd -xf build/kernel-root.tar.zst -C package
-
-          KVER="$(cat package/kernelrelease)"
-          rm -f package/kernelrelease
-
-          # Arch layout: vmlinuz lives in /usr/lib/modules/<version>/
-          install -Dm644 "package/boot/vmlinuz-${KVER}" \
-            "package/usr/lib/modules/${KVER}/vmlinuz"
-          echo "linux-cachyos-zen2-eevdf" > "package/usr/lib/modules/${KVER}/pkgbase"
-          rm -rf package/boot
-
-          PKGVER="${KVER//-/_}"
-          PKGVER="${PKGVER//+/_}"
-
-          mkdir -p archpkg/pkgroot-headers
-          cp -a package archpkg/pkgroot
-          tar --zstd -xf build/headers-root.tar.zst -C archpkg/pkgroot-headers
-
-          cat > archpkg/PKGBUILD <<EOF
-          pkgbase=linux-cachyos-zen2-eevdf
-          pkgname=('linux-cachyos-zen2-eevdf' 'linux-cachyos-zen2-eevdf-headers')
-          pkgver=${PKGVER}
-          pkgrel=1
-          arch=('x86_64')
-          license=('GPL-2.0-only')
-          options=('!strip' '!debug')
-
-          package_linux-cachyos-zen2-eevdf() {
-              pkgdesc="CachyOS Linux kernel with EEVDF for AMD Zen 2"
-              cp -a "\${startdir}/pkgroot/." "\${pkgdir}/"
-          }
-
-          package_linux-cachyos-zen2-eevdf-headers() {
-              pkgdesc="Headers and scripts for building modules for the CachyOS Zen 2 EEVDF kernel"
-              depends=('linux-cachyos-zen2-eevdf')
-              cp -a "\${startdir}/pkgroot-headers/." "\${pkgdir}/"
-          }
-          EOF
-
-          useradd -m builder
-          chown -R builder:builder archpkg
-
-          su builder -c "cd archpkg && makepkg --skipinteg --nocheck --nodeps"
-
-          mkdir -p artifacts
-          find archpkg -maxdepth 1 -type f -name '*.pkg.tar.zst' -exec cp {} artifacts/ \;
-
-          ls -lah artifacts
-
-      - name: Upload Arch package
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-arch-zen2-eevdf
-          path: artifacts/*.pkg.tar.zst
-
   deb:
-    name: Ubuntu/Debian package
-    needs:
-      - build
+    name: Package Q704 Ubuntu Debian
+    needs: build
     runs-on: ubuntu-24.04
 
     steps:
       - name: Install packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            dpkg-dev \
-            zstd \
-            tar
+          sudo apt-get install -y dpkg-dev zstd tar
 
-      - name: Download kernel build
+      - name: Download Q704 build
         uses: actions/download-artifact@v4
         with:
-          name: kernel-build
+          name: q704-kernel-root
           path: build
 
-      - name: Create Debian package
+      - name: Create Q704 Debian packages
         run: |
           mkdir -p package
           tar --zstd -xf build/kernel-root.tar.zst -C package
 
           KVER="$(cat package/kernelrelease)"
           rm -f package/kernelrelease
+          PKG="linux-cachyos-q704-haswell-eevdf"
 
           mkdir -p package/DEBIAN
-
           cat > package/DEBIAN/control <<EOF
-          Package: linux-cachyos-zen2-eevdf
+          Package: ${PKG}
           Version: ${KVER}
           Section: kernel
           Priority: optional
           Architecture: amd64
-          Maintainer: GitHub Actions <noreply@github.com>
-          Description: CachyOS Linux kernel with EEVDF for AMD Zen 2
+          Maintainer: HaloT455 GitHub Actions <noreply@github.com>
+          Description: CachyOS 7.2.8 EEVDF kernel optimized for Fujitsu Stylistic Q704 Haswell
+           Q704 kernel using Haswell target, PREEMPT_DYNAMIC, HZ 300, MGLRU, O3 and ThinLTO.
           EOF
 
           cat > package/DEBIAN/postinst <<EOF
           #!/bin/sh
           set -e
-
           depmod "${KVER}" || true
-
           if command -v update-initramfs >/dev/null 2>&1; then
               update-initramfs -c -k "${KVER}" || true
           fi
-
           if command -v update-grub >/dev/null 2>&1; then
               update-grub || true
           fi
-
           exit 0
           EOF
 
@@ -470,96 +366,45 @@ jobs:
           cat > package/DEBIAN/postrm <<EOF
           #!/bin/sh
           set -e
-
           rm -f "/boot/initrd.img-${KVER}" || true
           depmod -a || true
-
           if command -v update-grub >/dev/null 2>&1; then
               update-grub || true
           fi
-
           exit 0
           EOF
 
-          chmod 0755 \
-            package/DEBIAN/postinst \
-            package/DEBIAN/prerm \
-            package/DEBIAN/postrm
+          chmod 0755 package/DEBIAN/postinst package/DEBIAN/prerm package/DEBIAN/postrm
 
           mkdir -p artifacts
+          dpkg-deb --build --root-owner-group package \
+            "artifacts/${PKG}_${KVER}_amd64.deb"
 
-          dpkg-deb \
-            --build \
-            --root-owner-group \
-            package \
-            "artifacts/linux-cachyos-zen2-eevdf_${KVER}_amd64.deb"
-
-          dpkg-deb --info \
-            "artifacts/linux-cachyos-zen2-eevdf_${KVER}_amd64.deb"
-
-          # Headers package
           mkdir -p package-headers
           tar --zstd -xf build/headers-root.tar.zst -C package-headers
           mkdir -p package-headers/DEBIAN
 
           cat > package-headers/DEBIAN/control <<EOF
-          Package: linux-cachyos-zen2-eevdf-headers
+          Package: ${PKG}-headers
           Version: ${KVER}
           Section: kernel
           Priority: optional
           Architecture: amd64
-          Depends: linux-cachyos-zen2-eevdf
-          Maintainer: GitHub Actions <noreply@github.com>
-          Description: Headers and scripts for CachyOS Zen 2 EEVDF kernel
+          Depends: ${PKG}
+          Maintainer: HaloT455 GitHub Actions <noreply@github.com>
+          Description: Headers for the Fujitsu Q704 CachyOS Haswell EEVDF kernel
           EOF
 
-          dpkg-deb \
-            --build \
-            --root-owner-group \
-            package-headers \
-            "artifacts/linux-cachyos-zen2-eevdf-headers_${KVER}_amd64.deb"
+          dpkg-deb --build --root-owner-group package-headers \
+            "artifacts/${PKG}-headers_${KVER}_amd64.deb"
 
-          dpkg-deb --info \
-            "artifacts/linux-cachyos-zen2-eevdf-headers_${KVER}_amd64.deb"
-
+          dpkg-deb --info "artifacts/${PKG}_${KVER}_amd64.deb"
+          dpkg-deb --info "artifacts/${PKG}-headers_${KVER}_amd64.deb"
           ls -lah artifacts
 
-      - name: Upload Debian package
+      - name: Upload Q704 Debian packages
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-deb-zen2-eevdf
+          name: q704-cachyos-haswell-deb
           path: artifacts/*.deb
-
-  release:
-    name: GitHub Release
-    if: startsWith(github.ref, 'refs/tags/cachyos-')
-    needs:
-      - arch
-      - deb
-
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Download Arch artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-arch-zen2-eevdf
-          path: release
-
-      - name: Download Debian artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-deb-zen2-eevdf
-          path: release
-
-      - name: List release files
-        run: |
-          find release -type f -print
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            release/*.pkg.tar.zst
-            release/*.deb
+          retention-days: 30
