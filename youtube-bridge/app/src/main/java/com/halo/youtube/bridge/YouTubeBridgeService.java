@@ -23,7 +23,6 @@ public class YouTubeBridgeService extends AccessibilityService {
     private static final String OFFICIAL_PACKAGE = "com.google.android.youtube.tv";
     private static final String PLAY_STORE = "com.android.vending";
     private static final String KATNISS_PACKAGE = "com.google.android.katniss";
-    private static final String LAUNCHER_PACKAGE = "com.google.android.apps.tv.launcherx";
     private static final String FRAMEWORK_STUB_PACKAGE = "com.android.tv.frameworkpackagestubs";
     private static final int KEYCODE_VIDEO_APP_3 = 291;
 
@@ -71,7 +70,6 @@ public class YouTubeBridgeService extends AccessibilityService {
                 handler.postDelayed(() -> launchModSearch(q), 90);
             }
 
-            handler.postDelayed(YouTubeBridgeService.this::bringModTaskToFront, 650);
         }
 
         private void launchModHomeAfterDismiss() {
@@ -110,7 +108,6 @@ public class YouTubeBridgeService extends AccessibilityService {
                         || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
                 Log.i(TAG, "Suppressing post-redirect Assistant response");
                 performGlobalAction(GLOBAL_ACTION_BACK);
-                handler.postDelayed(this::bringModTaskToFront, 120);
             }
             return;
         }
@@ -148,7 +145,6 @@ public class YouTubeBridgeService extends AccessibilityService {
 
                 final String q = query;
                 handler.postDelayed(() -> launchModSearch(q), 140);
-                handler.postDelayed(this::bringModTaskToFront, 900);
                 return;
             }
 
@@ -183,26 +179,11 @@ public class YouTubeBridgeService extends AccessibilityService {
                     lastAssistantRedirectMs = now;
                     final String q = query;
                     handler.postDelayed(() -> launchModSearch(q), 100);
-                    handler.postDelayed(this::bringModTaskToFront, 650);
-                } else {
-                    handler.postDelayed(this::bringModTaskToFront, 120);
                 }
                 return;
             }
         }
 
-        // Assistant sometimes sends HOME at the end of the voice interaction after
-        // the mod has already started. During a short grace window, immediately
-        // restore the existing YouTube mod task without re-dispatching the search.
-        if (LAUNCHER_PACKAGE.equals(pkg)) {
-            long now = SystemClock.elapsedRealtime();
-            if (lastAssistantRedirectMs > 0
-                    && now - lastAssistantRedirectMs >= 400
-                    && now - lastAssistantRedirectMs <= 6500) {
-                Log.i(TAG, "Launcher appeared after Assistant redirect; restoring mod task");
-                handler.postDelayed(this::bringModTaskToFront, 180);
-            }
-        }
     }
 
     private void captureAssistantContext(AccessibilityEvent event) {
@@ -225,17 +206,64 @@ public class YouTubeBridgeService extends AccessibilityService {
             rememberGenericVoiceCandidate(anySpoken, now);
         }
 
-        String spoken = bestTextFromEvent(event, true);
-        if (!spoken.isEmpty() && spoken.toLowerCase(Locale.ROOT).contains("youtube")) {
+        // Explicit YouTube auto-launch must come from the current accessibility
+        // event/source only. Never scan the whole Assistant results tree here:
+        // labels such as "YouTube videos" are UI chrome, not the user's speech.
+        String spoken = bestEventLocalText(event, true);
+        if (isExplicitYoutubeVoiceCommand(spoken)) {
             lastAssistantUtterance = spoken.trim();
             lastAssistantUtteranceMs = now;
 
-            // Only explicit YouTube commands auto-launch. Generic searches remain
-            // inside Assistant until the user actually selects a video result.
-            Log.i(TAG, "Katniss utterance=" + lastAssistantUtterance);
+            Log.i(TAG, "Katniss explicit YouTube utterance=" + lastAssistantUtterance);
             handler.removeCallbacks(directAssistantLaunchRunnable);
             handler.postDelayed(directAssistantLaunchRunnable, 250);
         }
+    }
+
+    private String bestEventLocalText(AccessibilityEvent event, boolean requireYoutube) {
+        String best = "";
+
+        List<CharSequence> texts = event.getText();
+        if (texts != null) {
+            for (CharSequence cs : texts) {
+                best = chooseBetter(best, cs, requireYoutube);
+            }
+        }
+
+        best = chooseBetter(best, event.getContentDescription(), requireYoutube);
+
+        AccessibilityNodeInfo source = event.getSource();
+        if (source != null) {
+            best = chooseBetter(best, source.getText(), requireYoutube);
+            best = chooseBetter(best, source.getContentDescription(), requireYoutube);
+        }
+
+        return best;
+    }
+
+    private boolean isExplicitYoutubeVoiceCommand(String value) {
+        if (value == null) return false;
+        String raw = value.trim();
+        if (raw.isEmpty()) return false;
+
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (!lower.contains("youtube")) return false;
+
+        String q = sanitizeQuery(raw);
+        if (q.isEmpty() || isGenericUiLabel(q)) return false;
+
+        // Reject Assistant result-page chrome even if it contains the word YouTube.
+        String compact = lower.replaceAll("\\s+", " ").trim();
+        if (compact.equals("youtube videos")
+                || compact.equals("youtube video")
+                || compact.equals("videos youtube")
+                || compact.equals("video youtube")
+                || compact.equals("videos on youtube")
+                || compact.equals("video on youtube")) {
+            return false;
+        }
+
+        return true;
     }
 
     private String bestTextFromEvent(AccessibilityEvent event, boolean requireYoutube) {
@@ -437,21 +465,6 @@ public class YouTubeBridgeService extends AccessibilityService {
         launchModHomeFallback();
     }
 
-    private void bringModTaskToFront() {
-        try {
-            Intent intent = getPackageManager().getLaunchIntentForPackage(MOD_PACKAGE);
-            if (intent == null) return;
-
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            startActivity(intent);
-            Log.i(TAG, "Brought existing mod task to foreground");
-        } catch (Throwable t) {
-            Log.w(TAG, "Failed to bring mod task to foreground", t);
-        }
-    }
-
     private void launchModHomeFallback() {
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
@@ -503,7 +516,6 @@ public class YouTubeBridgeService extends AccessibilityService {
             performGlobalAction(GLOBAL_ACTION_BACK);
             final String q = query;
             handler.postDelayed(() -> launchModSearch(q), 140);
-            handler.postDelayed(this::bringModTaskToFront, 900);
             return;
         }
 
