@@ -36,6 +36,11 @@ public class YouTubeBridgeService extends AccessibilityService {
     private String lastAssistantUtterance = "";
     private long lastAssistantUtteranceMs = 0L;
 
+    // Last human voice query even when it does not explicitly mention YouTube.
+    // Used only after the user chooses a YouTube/video result; it never auto-launches.
+    private String lastAssistantAnyUtterance = "";
+    private long lastAssistantAnyUtteranceMs = 0L;
+
     private String lastAssistantClickedText = "";
     private long lastAssistantClickedTextMs = 0L;
 
@@ -162,10 +167,26 @@ public class YouTubeBridgeService extends AccessibilityService {
         // immediately follows a recent YouTube Assistant command.
         if (FRAMEWORK_STUB_PACKAGE.equals(pkg)) {
             long now = SystemClock.elapsedRealtime();
-            if (lastAssistantUtteranceMs > 0 && now - lastAssistantUtteranceMs <= 5000) {
-                Log.i(TAG, "Framework YouTube stub intercepted; dismissing unsupported-app UI");
+            boolean recentExplicitYoutube =
+                    lastAssistantUtteranceMs > 0 && now - lastAssistantUtteranceMs <= 5000;
+            boolean recentAnyVoice =
+                    lastAssistantAnyUtteranceMs > 0 && now - lastAssistantAnyUtteranceMs <= 15000;
+            boolean recentResultClick =
+                    lastAssistantClickedTextMs > 0 && now - lastAssistantClickedTextMs <= 5000;
+
+            if (recentExplicitYoutube || recentAnyVoice || recentResultClick) {
+                String query = getRecentAssistantQuery(now);
+                Log.i(TAG, "Framework YouTube stub intercepted; query=" + query);
                 performGlobalAction(GLOBAL_ACTION_BACK);
-                handler.postDelayed(this::bringModTaskToFront, 120);
+
+                if (!query.isEmpty()) {
+                    lastAssistantRedirectMs = now;
+                    final String q = query;
+                    handler.postDelayed(() -> launchModSearch(q), 100);
+                    handler.postDelayed(this::bringModTaskToFront, 650);
+                } else {
+                    handler.postDelayed(this::bringModTaskToFront, 120);
+                }
                 return;
             }
         }
@@ -196,14 +217,26 @@ public class YouTubeBridgeService extends AccessibilityService {
             }
         }
 
+        // Remember the user's current voice query even if it does not contain
+        // "YouTube". This supports flows such as saying "karaoke chân ái",
+        // reviewing Assistant's video results, then selecting one.
+        String anySpoken = bestTextFromEvent(event, false);
+        if (isUsefulSpokenQuery(anySpoken)) {
+            String cleaned = sanitizeQuery(anySpoken);
+            if (!cleaned.isEmpty() && !isGenericUiLabel(cleaned)) {
+                lastAssistantAnyUtterance = anySpoken.trim();
+                lastAssistantAnyUtteranceMs = now;
+                Log.i(TAG, "Katniss any utterance=" + lastAssistantAnyUtterance);
+            }
+        }
+
         String spoken = bestTextFromEvent(event, true);
         if (!spoken.isEmpty() && spoken.toLowerCase(Locale.ROOT).contains("youtube")) {
             lastAssistantUtterance = spoken.trim();
             lastAssistantUtteranceMs = now;
 
-            // Direct fallback for TVs where Assistant reports "no supporting app"
-            // when the Google-signed YouTube package is absent for user 0.
-            // Debounce transcription updates; the last (final/longest) phrase wins.
+            // Only explicit YouTube commands auto-launch. Generic searches remain
+            // inside Assistant until the user actually selects a video result.
             Log.i(TAG, "Katniss utterance=" + lastAssistantUtterance);
             handler.removeCallbacks(directAssistantLaunchRunnable);
             handler.postDelayed(directAssistantLaunchRunnable, 250);
@@ -273,26 +306,62 @@ public class YouTubeBridgeService extends AccessibilityService {
         if (t.length() < 2 || t.length() > 180) return false;
 
         String lower = t.toLowerCase(Locale.ROOT);
-        return !(lower.equals("youtube")
-                || lower.equals("mở")
-                || lower.equals("phát")
+        return !isGenericUiLabel(lower)
+                && !(lower.equals("mở")
+                || lower.equals("phát"));
+    }
+
+    private boolean isGenericUiLabel(String value) {
+        if (value == null) return true;
+        String lower = value.trim().toLowerCase(Locale.ROOT);
+        return lower.equals("youtube")
+                || lower.equals("video")
+                || lower.equals("videos")
+                || lower.equals("video clip")
+                || lower.equals("video clips")
+                || lower.equals("kết quả video")
+                || lower.equals("các video")
                 || lower.equals("xem thêm")
-                || lower.equals("more"));
+                || lower.equals("more")
+                || lower.equals("results")
+                || lower.equals("search results");
+    }
+
+    private boolean isUsefulSpokenQuery(String value) {
+        if (value == null) return false;
+        String t = value.trim();
+        if (t.length() < 2 || t.length() > 120) return false;
+        if (isGenericUiLabel(t)) return false;
+
+        String lower = t.toLowerCase(Locale.ROOT);
+        // Exclude common Assistant chrome/status text that can appear in the
+        // accessibility tree and should never become a YouTube search query.
+        return !(lower.contains("đang nghe")
+                || lower.contains("thử nói")
+                || lower.contains("google assistant")
+                || lower.contains("kết quả tìm kiếm")
+                || lower.startsWith("nhấn "));
     }
 
     private String getRecentAssistantQuery(long now) {
-        // Prefer the user's spoken command. Assistant result cards can contain
-        // recommendation/title text unrelated to the exact requested query.
+        // Explicit YouTube voice command has highest priority.
         if (!lastAssistantUtterance.isEmpty() && now - lastAssistantUtteranceMs <= 9000) {
             String q = sanitizeQuery(lastAssistantUtterance);
-            if (!q.isEmpty()) return q;
+            if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
         }
 
-        // Fallback: use a clicked Assistant result only when no recent spoken
-        // YouTube command was captured.
+        // Next prefer the original spoken query even when it did not say YouTube.
+        // This prevents Assistant section labels such as "Videos" from replacing
+        // a query like "karaoke chân ái" after the user selects a video result.
+        if (!lastAssistantAnyUtterance.isEmpty() && now - lastAssistantAnyUtteranceMs <= 15000) {
+            String q = sanitizeQuery(lastAssistantAnyUtterance);
+            if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
+        }
+
+        // Last resort: clicked result text, but never generic UI labels.
         if (!lastAssistantClickedText.isEmpty() && now - lastAssistantClickedTextMs <= 6000) {
             String q = sanitizeQuery(lastAssistantClickedText);
-            if (!q.isEmpty()) return q;
+            if (!q.isEmpty() && !isGenericUiLabel(q)) return q;
         }
 
         return "";
