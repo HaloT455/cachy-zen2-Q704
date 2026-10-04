@@ -1,2 +1,11 @@
 #!/bin/sh
+
+# Ensure AT-SPI accessibility is enabled so Chrome/Chromium and desktop apps
+# expose focused editable controls to the Q704 keyboard.
+if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface toolkit-accessibility true >/dev/null 2>&1 || true
+fi
+
+export NO_AT_BRIDGE=0
+
 exec /usr/bin/python3 /usr/lib/q704-zorin-keyboard/q704_osk.py "$@"
