@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 import os
+import signal
 import subprocess
-import threading
-import time
-from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-try:
-    gi.require_version("GdkX11", "3.0")
-    from gi.repository import GdkX11
-except Exception:
-    GdkX11 = None
-
 from gi.repository import Gtk, Gdk, GLib
 
 try:
@@ -24,12 +16,7 @@ except Exception:
 
 from evdev import UInput, ecodes as e
 
-try:
-    import pyatspi
-except Exception:
-    pyatspi = None
-
-APP_NAME = "Q704 Zorin Keyboard"
+APP_NAME = "Q704 Zorin Keyboard - V1 Core"
 
 KEYS = {
     "Esc": e.KEY_ESC, "1": e.KEY_1, "2": e.KEY_2, "3": e.KEY_3, "4": e.KEY_4,
@@ -72,12 +59,39 @@ ROWS = [
      ("Del","Del",1.2), ("Ẩn","Hide",1.2)]
 ]
 
-EDITABLE_ROLES = set()
-if pyatspi:
-    for role_name in ("ROLE_ENTRY", "ROLE_PASSWORD_TEXT", "ROLE_TEXT", "ROLE_PARAGRAPH", "ROLE_DOCUMENT_TEXT"):
-        role = getattr(pyatspi, role_name, None)
-        if role is not None:
-            EDITABLE_ROLES.add(role)
+def css():
+    return """
+    window.q704-keyboard {
+        background-image: none;
+        background-color: rgba(62, 24, 45, 0.98);
+    }
+    .keyboard-panel {
+        background-color: rgba(70, 28, 51, 0.96);
+        border-radius: 20px 20px 0 0;
+        padding: 12px;
+    }
+    button.key {
+        min-height: 52px;
+        min-width: 42px;
+        margin: 3px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background-image: none;
+        background-color: rgba(92, 46, 67, 0.96);
+        color: #ffffff;
+        font-weight: 600;
+        font-size: 16px;
+    }
+    button.key:hover {
+        background-color: rgba(255, 111, 168, 0.92);
+    }
+    button.key:active, button.shift-on {
+        background-color: #ff5fa2;
+    }
+    button.enter-key {
+        background-color: #ff4f9a;
+    }
+    """
 
 class InputBackend:
     def __init__(self):
@@ -87,7 +101,7 @@ class InputBackend:
             name="Q704 Zorin Virtual Keyboard",
             vendor=0x10cf,
             product=0x0704,
-            version=2,
+            version=10,
         )
 
     def tap(self, code, shift=False, ctrl=False, alt=False):
@@ -98,109 +112,34 @@ class InputBackend:
             mods.append(e.KEY_LEFTCTRL)
         if alt:
             mods.append(e.KEY_LEFTALT)
-        for m in mods:
-            self.ui.write(e.EV_KEY, m, 1)
+
+        for mod in mods:
+            self.ui.write(e.EV_KEY, mod, 1)
+
         self.ui.write(e.EV_KEY, code, 1)
         self.ui.syn()
         self.ui.write(e.EV_KEY, code, 0)
-        for m in reversed(mods):
-            self.ui.write(e.EV_KEY, m, 0)
+
+        for mod in reversed(mods):
+            self.ui.write(e.EV_KEY, mod, 0)
+
         self.ui.syn()
 
     def close(self):
-        if self.ui:
-            self.ui.close()
-
-def current_wallpaper():
-    try:
-        uri = subprocess.check_output(
-            ["gsettings", "get", "org.gnome.desktop.background", "picture-uri-dark"],
-            text=True, stderr=subprocess.DEVNULL
-        ).strip().strip("'")
-        if not uri or uri == "''":
-            uri = subprocess.check_output(
-                ["gsettings", "get", "org.gnome.desktop.background", "picture-uri"],
-                text=True, stderr=subprocess.DEVNULL
-            ).strip().strip("'")
-        if uri.startswith("file://"):
-            path = uri[7:]
-            if os.path.exists(path):
-                return path
-    except Exception:
-        pass
-
-    for root in ("/usr/share/backgrounds", "/usr/share/zorin-os"):
-        root_path = Path(root)
-        if root_path.exists():
-            for pattern in ("*zorin*.jpg", "*zorin*.png", "*.jpg", "*.png"):
-                found = next(iter(root_path.rglob(pattern)), None)
-                if found:
-                    return str(found)
-    return None
-
-def css_for(_wallpaper=None):
-    return """
-    window.q704-keyboard {
-        background-image: none;
-        background-color: rgba(62, 24, 45, 0.98);
-    }
-    .keyboard-panel {{
-        background-color: rgba(70, 28, 51, 0.90);
-        border-radius: 22px 22px 0 0;
-        padding: 12px 14px 14px 14px;
-    }}
-    button.key {{
-        min-height: 52px;
-        min-width: 42px;
-        margin: 3px;
-        border-radius: 12px;
-        border: 1px solid rgba(255,255,255,0.13);
-        background-image: none;
-        background-color: rgba(92, 46, 67, 0.95);
-        color: #ffffff;
-        font-weight: 600;
-        font-size: 16px;
-        box-shadow: inset 0 1px rgba(255,255,255,0.06);
-    }}
-    button.key:hover {{
-        background-color: rgba(255, 111, 168, 0.90);
-    }}
-    button.key:active, button.shift-on {{
-        background-color: #ff5fa2;
-    }}
-    button.enter-key {{
-        background-color: rgba(255, 79, 154, 0.96);
-    }}
-    button.handle {{
-        min-width: 56px;
-        min-height: 56px;
-        border-radius: 18px;
-        background-image: none;
-        background-color: rgba(92, 46, 67, 0.95);
-        color: white;
-        font-size: 25px;
-        border: 1px solid rgba(255,255,255,0.18);
-    }}
-    """
+        self.ui.close()
 
 class KeyboardApp:
     def __init__(self):
-        try:
-            self.backend = InputBackend()
-        except Exception as ex:
-            self.show_fatal(ex)
-            return
-
+        self.backend = InputBackend()
         self.shift = False
         self.ctrl = False
         self.alt = False
         self.key_buttons = []
         self.enter_buttons = []
-        self.hide_timer = None
-        self.keyboard_height = 0
+        self.focus_helper = None
 
         provider = Gtk.CssProvider()
-        provider.load_from_data(css_for(current_wallpaper()).encode())
+        provider.load_from_data(css().encode())
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             provider,
@@ -218,12 +157,10 @@ class KeyboardApp:
         self.keyboard.set_skip_pager_hint(True)
         self.keyboard.set_accept_focus(False)
         self.keyboard.set_focus_on_map(False)
-        # DOCK made GNOME/Zorin relocate the window unpredictably. Keep it
-        # utility-like and force its X11 geometry ourselves.
+        # V1 core behavior: utility window, not GNOME DOCK. This avoids the
+        # panel/WM moving the keyboard around.
         self.keyboard.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        self.keyboard.set_gravity(Gdk.Gravity.NORTH_WEST)
         self.keyboard.connect("delete-event", self.on_hide)
-        self.keyboard.connect("map-event", self.on_keyboard_mapped)
 
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         panel.get_style_context().add_class("keyboard-panel")
@@ -231,7 +168,6 @@ class KeyboardApp:
 
         for row in ROWS:
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
-            box.set_homogeneous(False)
             panel.pack_start(box, True, True, 0)
             for label, action, weight in row:
                 button = Gtk.Button(label=label)
@@ -247,68 +183,15 @@ class KeyboardApp:
                 self.key_buttons.append((button, label, action))
 
         self.indicator = None
-        self.setup_panel_indicator()
+        self.setup_indicator()
 
-        self.fcitx_monitor = None
-        self.fcitx_thread = None
-        self.fcitx_focus = False
+        # Focus watcher is intentionally isolated from the V1 keyboard core.
+        signal.signal(signal.SIGUSR1, self._sig_show)
+        signal.signal(signal.SIGUSR2, self._sig_hide)
+        self.start_focus_helper()
+        GLib.timeout_add(3000, self.ensure_focus_helper)
 
-        # Start Fcitx monitor immediately. Do not defer this behind AT-SPI:
-        # on this Zorin session AT-SPI registration can delay later idle jobs.
-        self.start_fcitx_monitor()
-
-        GLib.timeout_add(800, self.keep_positioned)
-        GLib.timeout_add(2500, self.poll_focused_editable)
-        GLib.timeout_add(1200, self.start_accessibility_later)
-
-    def start_accessibility_later(self):
-        self.setup_accessibility_watcher()
-        return False
-
-    def show_fatal(self, ex):
-        dialog = Gtk.MessageDialog(
-            transient_for=None,
-            flags=0,
-            message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.CLOSE,
-            text="Q704 Zorin Keyboard chưa truy cập được /dev/uinput",
-        )
-        dialog.format_secondary_text(
-            f"{ex}\n\nHãy chạy:\n"
-            "sudo modprobe uinput\n"
-            "sudo udevadm control --reload-rules\n"
-            "sudo udevadm trigger /dev/uinput\n"
-            "sau đó đăng xuất/đăng nhập lại nếu cần."
-        )
-        dialog.run()
-        dialog.destroy()
-        GLib.idle_add(Gtk.main_quit)
-
-    def monitor_info(self):
-        screen = Gdk.Screen.get_default()
-        monitor = screen.get_primary_monitor()
-        if monitor < 0:
-            monitor = 0
-        geo = screen.get_monitor_geometry(monitor)
-        try:
-            work = screen.get_monitor_workarea(monitor)
-        except Exception:
-            work = geo
-        return geo, work
-
-    def screen_geometry(self):
-        return self.monitor_info()[0]
-
-    def workarea_geometry(self):
-        return self.monitor_info()[1]
-
-    def keyboard_dimensions(self):
-        _geo, work = self.monitor_info()
-        width = work.width
-        height = min(380, max(300, int(work.height * 0.40)))
-        return width, height
-
-    def setup_panel_indicator(self):
+    def setup_indicator(self):
         if AyatanaAppIndicator3 is None:
             return
 
@@ -321,6 +204,7 @@ class KeyboardApp:
             self.indicator.set_icon_theme_path("/usr/share/icons/hicolor/scalable/apps")
         except Exception:
             pass
+
         self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("Q704 Keyboard")
 
@@ -336,112 +220,51 @@ class KeyboardApp:
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        quit_item = Gtk.MenuItem(label="Thoát Q704 Keyboard")
+        quit_item = Gtk.MenuItem(label="Thoát")
         quit_item.connect("activate", self.quit_app)
         menu.append(quit_item)
 
         menu.show_all()
         self.indicator.set_menu(menu)
 
-    def quit_app(self, *_):
-        self.hide_keyboard()
-        try:
-            if self.fcitx_monitor:
-                self.fcitx_monitor.terminate()
-        except Exception:
-            pass
-        try:
-            self.backend.close()
-        except Exception:
-            pass
-        Gtk.main_quit()
+    def monitor_workarea(self):
+        screen = Gdk.Screen.get_default()
+        mon = screen.get_primary_monitor()
+        if mon < 0:
+            mon = 0
 
-    def keep_positioned(self):
-        if self.keyboard.get_visible():
-            self.force_x11_geometry()
-        return True
+        try:
+            work = screen.get_monitor_workarea(mon)
+        except Exception:
+            work = screen.get_monitor_geometry(mon)
+
+        return work
 
     def position_keyboard(self):
-        _geo, work = self.monitor_info()
-        width, height = self.keyboard_dimensions()
-        self.keyboard_height = height
+        work = self.monitor_workarea()
+        width = work.width
+        height = min(360, max(300, int(work.height * 0.38)))
         x = work.x
         y = work.y + work.height - height
-        self.keyboard.set_default_size(width, height)
         self.keyboard.resize(width, height)
         self.keyboard.move(x, y)
-        return x, y, width, height
-
-    def on_keyboard_mapped(self, *_):
-        GLib.timeout_add(40, self.force_x11_geometry)
-        GLib.timeout_add(180, self.force_x11_geometry)
-        return False
-
-    def force_x11_geometry(self):
-        if not self.keyboard.get_visible():
-            return False
-
-        x, y, width, height = self.position_keyboard()
-        xid = self.x11_window_id()
-        if not xid:
-            return False
-
-        try:
-            subprocess.run(
-                ["wmctrl", "-ir", str(xid), "-b", "add,above,skip_taskbar,skip_pager"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            subprocess.run(
-                ["wmctrl", "-ir", str(xid), "-e", f"0,{x},{y},{width},{height}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except Exception:
-            pass
-        return False
-
-    def x11_window_id(self):
-        if GdkX11 is None:
-            return None
-        gdk_window = self.keyboard.get_window()
-        if not gdk_window:
-            return None
-        try:
-            return GdkX11.X11Window.get_xid(gdk_window)
-        except Exception:
-            try:
-                return gdk_window.get_xid()
-            except Exception:
-                return None
-
-    def apply_bottom_strut(self):
-        # Disabled in V1.3: applying STRUT to the keyboard itself made
-        # GNOME/Zorin move the keyboard to the wrong edge.
-        return False
-
-    def clear_bottom_strut(self):
-        return
 
     def show_keyboard(self):
-        if self.hide_timer:
-            try:
-                GLib.source_remove(self.hide_timer)
-            except Exception:
-                pass
-            self.hide_timer = None
         self.position_keyboard()
         if not self.keyboard.get_visible():
             self.keyboard.show_all()
-        GLib.timeout_add(40, self.force_x11_geometry)
-        GLib.timeout_add(180, self.force_x11_geometry)
+        # Re-apply once after map. Keeps V1's simple positioning without
+        # STRUT/DOCK/wmctrl jumping.
+        GLib.timeout_add(80, self._reposition_once)
+        return False
+
+    def _reposition_once(self):
+        if self.keyboard.get_visible():
+            self.position_keyboard()
         return False
 
     def hide_keyboard(self):
-        if self.keyboard.get_visible():
-            self.keyboard.hide()
+        self.keyboard.hide()
         return False
 
     def toggle(self, *_):
@@ -454,231 +277,35 @@ class KeyboardApp:
         self.hide_keyboard()
         return True
 
-    def start_fcitx_monitor(self):
-        if self.fcitx_monitor and self.fcitx_monitor.poll() is None:
-            return False
+    def _sig_show(self, *_):
+        GLib.idle_add(self.show_keyboard)
 
-        try:
-            # Spawn in GTK/main thread. Only reading is delegated to a worker.
-            self.fcitx_monitor = subprocess.Popen(
-                [
-                    "/usr/bin/stdbuf", "-oL", "-eL",
-                    "/usr/bin/dbus-monitor",
-                    "--session",
-                    "interface='org.fcitx.Fcitx.InputContext1'",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            print(
-                f"[Q704] Fcitx5 DBus monitor started pid={self.fcitx_monitor.pid}",
-                flush=True,
-            )
+    def _sig_hide(self, *_):
+        GLib.idle_add(self.hide_keyboard)
 
-            self.fcitx_thread = threading.Thread(
-                target=self._fcitx_read_loop,
-                args=(self.fcitx_monitor,),
-                name="q704-fcitx-reader",
-                daemon=True,
-            )
-            self.fcitx_thread.start()
-        except Exception as ex:
-            print(f"[Q704] Fcitx monitor start error: {ex}", flush=True)
-            GLib.timeout_add(1200, self.start_fcitx_monitor)
-
-        return False
-
-    def _fcitx_read_loop(self, proc):
-        try:
-            for raw in proc.stdout:
-                line = raw.strip()
-
-                if "member=FocusIn" in line:
-                    print("[Q704] FCITX FocusIn", flush=True)
-                    self.fcitx_focus = True
-                    GLib.idle_add(self.show_keyboard)
-
-                elif "member=FocusOut" in line or "member=NotifyFocusOut" in line:
-                    print("[Q704] FCITX FocusOut", flush=True)
-                    self.fcitx_focus = False
-                    GLib.timeout_add(300, self.hide_after_fcitx_focusout)
-
-                elif "member=SetCursorRect" in line or "member=SetCursorRectV2" in line:
-                    # Cursor rect is emitted by focused editable clients.
-                    if not self.fcitx_focus:
-                        print("[Q704] FCITX editable cursor", flush=True)
-                    self.fcitx_focus = True
-                    GLib.idle_add(self.show_keyboard)
-
-            rc = proc.wait()
-            print(f"[Q704] Fcitx monitor exited rc={rc}", flush=True)
-        except Exception as ex:
-            print(f"[Q704] Fcitx reader error: {ex}", flush=True)
-        finally:
-            self.fcitx_monitor = None
-            GLib.timeout_add(1200, self.start_fcitx_monitor)
-
-    def hide_after_fcitx_focusout(self):
-        if not self.fcitx_focus:
-            self.hide_keyboard()
-        return False
-
-    def setup_accessibility_watcher(self):
-        if pyatspi is None:
-            return False
-        try:
-            pyatspi.Registry.registerEventListener(
-                self.on_focus_event,
-                "object:state-changed:focused",
-            )
-            pyatspi.Registry.registerEventListener(
-                self.on_text_activity,
-                "object:text-caret-moved",
-            )
-            pyatspi.Registry.registerEventListener(
-                self.on_text_activity,
-                "object:state-changed:editable",
-            )
-            pyatspi.Registry.registerEventListener(
-                self.on_window_activate,
-                "window:activate",
-            )
-        except Exception:
-            pass
-        return False
-
-    def on_text_activity(self, event):
-        try:
-            source = event.source
-        except Exception:
+    def start_focus_helper(self):
+        if self.focus_helper and self.focus_helper.poll() is None:
             return
-        if self.accessible_is_editable(source):
-            self.update_enter_mode(source)
-            GLib.idle_add(self.show_keyboard)
 
-    def on_window_activate(self, _event):
-        GLib.timeout_add(120, self.poll_focused_editable)
+        helper = "/usr/lib/q704-zorin-keyboard/q704_focusd.py"
+        if not os.path.exists(helper):
+            return
 
-    def find_focused_descendant(self, root, max_nodes=3000):
-        if pyatspi is None or root is None:
-            return None
-        stack = [root]
-        seen = 0
-        while stack and seen < max_nodes:
-            obj = stack.pop()
-            seen += 1
-            try:
-                state = obj.getState()
-                if state.contains(pyatspi.STATE_FOCUSED):
-                    return obj
-                count = obj.childCount
-                # Reverse so the first children remain first in DFS.
-                for i in range(count - 1, -1, -1):
-                    child = obj.getChildAtIndex(i)
-                    if child is not None:
-                        stack.append(child)
-            except Exception:
-                continue
-        return None
+        env = os.environ.copy()
+        env["NO_AT_BRIDGE"] = "0"
+        env["QT_ACCESSIBILITY"] = "1"
 
-    def poll_focused_editable(self):
-        if pyatspi is None:
-            return True
-        try:
-            desktop = pyatspi.Registry.getDesktop(0)
-            for ai in range(desktop.childCount):
-                app = desktop.getChildAtIndex(ai)
-                if app is None:
-                    continue
-                for wi in range(app.childCount):
-                    win = app.getChildAtIndex(wi)
-                    if win is None:
-                        continue
-                    try:
-                        state = win.getState()
-                        if not state.contains(pyatspi.STATE_ACTIVE):
-                            continue
-                    except Exception:
-                        continue
-                    focused = self.find_focused_descendant(win)
-                    if focused is not None and self.accessible_is_editable(focused):
-                        self.update_enter_mode(focused)
-                        self.show_keyboard()
-                        return True
-        except Exception:
-            pass
+        log = open("/tmp/q704-focusd.log", "a", buffering=1)
+        self.focus_helper = subprocess.Popen(
+            ["/usr/bin/python3", helper, str(os.getpid())],
+            stdout=log,
+            stderr=log,
+            env=env,
+        )
+
+    def ensure_focus_helper(self):
+        self.start_focus_helper()
         return True
-
-    def accessible_is_editable(self, obj):
-        if obj is None or pyatspi is None:
-            return False
-
-        try:
-            state = obj.getState()
-            if state.contains(pyatspi.STATE_EDITABLE):
-                return True
-        except Exception:
-            pass
-
-        try:
-            role = obj.getRole()
-            if role in (
-                getattr(pyatspi, "ROLE_ENTRY", -1),
-                getattr(pyatspi, "ROLE_PASSWORD_TEXT", -1),
-            ):
-                return True
-        except Exception:
-            pass
-        return False
-
-    def update_enter_mode(self, obj):
-        label = "↵"
-        text = ""
-        try:
-            text = " ".join([
-                str(getattr(obj, "name", "") or ""),
-                str(getattr(obj, "description", "") or ""),
-            ]).lower()
-        except Exception:
-            pass
-
-        search_words = ("search", "tìm", "find", "address", "url")
-        send_words = ("message", "tin nhắn", "chat", "comment", "reply", "gửi", "send")
-
-        if any(word in text for word in search_words):
-            label = "Tìm ↵"
-        elif any(word in text for word in send_words):
-            label = "Gửi ↵"
-
-        for button in self.enter_buttons:
-            button.set_label(label)
-
-    def on_focus_event(self, event):
-        try:
-            focused = bool(event.detail1)
-            source = event.source
-        except Exception:
-            return
-
-        if focused and self.accessible_is_editable(source):
-            self.update_enter_mode(source)
-            GLib.idle_add(self.show_keyboard)
-            return
-
-        if focused and not self.accessible_is_editable(source):
-            if self.hide_timer:
-                try:
-                    GLib.source_remove(self.hide_timer)
-                except Exception:
-                    pass
-            self.hide_timer = GLib.timeout_add(220, self.hide_if_focus_still_not_editable)
-
-    def hide_if_focus_still_not_editable(self):
-        self.hide_timer = None
-        self.hide_keyboard()
-        return False
 
     def update_shift_labels(self):
         for button, original, action in self.key_buttons:
@@ -697,16 +324,20 @@ class KeyboardApp:
         if action == "Hide":
             self.hide_keyboard()
             return
+
         if action == "Shift":
             self.shift = not self.shift
             self.update_shift_labels()
             return
+
         if action == "Ctrl":
             self.ctrl = not self.ctrl
             return
+
         if action == "Alt":
             self.alt = not self.alt
             return
+
         if action == "IME":
             self.backend.tap(e.KEY_SPACE, ctrl=True)
             return
@@ -715,21 +346,44 @@ class KeyboardApp:
         if code is None:
             return
 
-        self.backend.tap(code, shift=self.shift, ctrl=self.ctrl, alt=self.alt)
+        self.backend.tap(
+            code,
+            shift=self.shift,
+            ctrl=self.ctrl,
+            alt=self.alt,
+        )
 
         if self.shift:
             self.shift = False
             self.update_shift_labels()
+
         self.ctrl = False
         self.alt = False
 
+        # Gboard-like requirement: Enter / Search / Send finishes input and
+        # hides the keyboard. The actual Enter key event is sent first.
         if action == "Enter":
-            GLib.timeout_add(120, self.hide_keyboard)
+            GLib.timeout_add(100, self.hide_keyboard)
+
+    def quit_app(self, *_):
+        try:
+            if self.focus_helper and self.focus_helper.poll() is None:
+                self.focus_helper.terminate()
+        except Exception:
+            pass
+        try:
+            self.backend.close()
+        except Exception:
+            pass
+        Gtk.main_quit()
 
     def run(self):
         Gtk.main()
 
 if __name__ == "__main__":
-    app = KeyboardApp()
-    if hasattr(app, "backend"):
+    try:
+        app = KeyboardApp()
         app.run()
+    except Exception as ex:
+        print(f"[Q704] fatal: {ex}", flush=True)
+        raise
