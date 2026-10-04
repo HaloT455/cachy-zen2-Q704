@@ -170,15 +170,18 @@ public class YouTubeBridgeService extends AccessibilityService {
     }
 
     private String getRecentAssistantQuery(long now) {
-        // A result click immediately before provider.OPEN is the best available proxy
-        // for the exact video/title Assistant intended to open.
-        if (!lastAssistantClickedText.isEmpty() && now - lastAssistantClickedTextMs <= 6000) {
-            String q = sanitizeQuery(lastAssistantClickedText);
+        // Prefer the user's spoken command. Assistant result cards can contain
+        // recommendation/title text unrelated to the exact requested query.
+        if (!lastAssistantUtterance.isEmpty() && now - lastAssistantUtteranceMs <= 9000) {
+            String q = sanitizeQuery(lastAssistantUtterance);
             if (!q.isEmpty()) return q;
         }
 
-        if (!lastAssistantUtterance.isEmpty() && now - lastAssistantUtteranceMs <= 9000) {
-            return sanitizeQuery(lastAssistantUtterance);
+        // Fallback: use a clicked Assistant result only when no recent spoken
+        // YouTube command was captured.
+        if (!lastAssistantClickedText.isEmpty() && now - lastAssistantClickedTextMs <= 6000) {
+            String q = sanitizeQuery(lastAssistantClickedText);
+            if (!q.isEmpty()) return q;
         }
 
         return "";
