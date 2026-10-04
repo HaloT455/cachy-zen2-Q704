@@ -264,6 +264,7 @@ class KeyboardApp:
         GLib.idle_add(self.position_handle)
         GLib.timeout_add(1200, self.keep_positioned)
         GLib.idle_add(self.setup_accessibility_watcher)
+        GLib.timeout_add(700, self.poll_focused_editable)
 
     def show_fatal(self, ex):
         dialog = Gtk.MessageDialog(
@@ -284,23 +285,34 @@ class KeyboardApp:
         dialog.destroy()
         GLib.idle_add(Gtk.main_quit)
 
-    def screen_geometry(self):
+    def monitor_info(self):
         screen = Gdk.Screen.get_default()
         monitor = screen.get_primary_monitor()
         if monitor < 0:
             monitor = 0
-        return screen.get_monitor_geometry(monitor)
+        geo = screen.get_monitor_geometry(monitor)
+        try:
+            work = screen.get_monitor_workarea(monitor)
+        except Exception:
+            work = geo
+        return geo, work
+
+    def screen_geometry(self):
+        return self.monitor_info()[0]
+
+    def workarea_geometry(self):
+        return self.monitor_info()[1]
 
     def keyboard_dimensions(self):
-        geo = self.screen_geometry()
-        width = geo.width
-        height = min(380, max(300, int(geo.height * 0.40)))
+        _geo, work = self.monitor_info()
+        width = work.width
+        height = min(380, max(300, int(work.height * 0.40)))
         return width, height
 
     def position_handle(self):
-        geo = self.screen_geometry()
+        _geo, work = self.monitor_info()
         self.handle.resize(60, 60)
-        self.handle.move(geo.x + geo.width - 78, geo.y + geo.height - 82)
+        self.handle.move(work.x + work.width - 78, work.y + work.height - 72)
         return False
 
     def keep_positioned(self):
@@ -311,11 +323,12 @@ class KeyboardApp:
         return True
 
     def position_keyboard(self):
-        geo = self.screen_geometry()
+        _geo, work = self.monitor_info()
         width, height = self.keyboard_dimensions()
         self.keyboard_height = height
         self.keyboard.resize(width, height)
-        self.keyboard.move(geo.x, geo.y + geo.height - height)
+        # Anchor above the Zorin panel/taskbar, never underneath it.
+        self.keyboard.move(work.x, work.y + work.height - height)
 
     def on_keyboard_mapped(self, *_):
         self.position_keyboard()
@@ -341,23 +354,27 @@ class KeyboardApp:
         if not xid or not self.keyboard.get_visible():
             return False
 
-        geo = self.screen_geometry()
+        geo, work = self.monitor_info()
         height = self.keyboard_height or self.keyboard_dimensions()[1]
-        start_x = max(0, geo.x)
-        end_x = max(start_x, geo.x + geo.width - 1)
+        keyboard_top = work.y + work.height - height
+        # Bottom strut is measured from the physical monitor bottom. Include
+        # the Zorin panel height so maximized apps stay above panel + keyboard.
+        bottom_reserve = max(height, (geo.y + geo.height) - keyboard_top)
+        start_x = max(0, work.x)
+        end_x = max(start_x, work.x + work.width - 1)
 
         try:
             subprocess.run([
                 "xprop", "-id", str(xid),
                 "-f", "_NET_WM_STRUT", "32c",
                 "-set", "_NET_WM_STRUT",
-                f"0, 0, 0, {height}",
+                f"0, 0, 0, {bottom_reserve}",
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             subprocess.run([
                 "xprop", "-id", str(xid),
                 "-f", "_NET_WM_STRUT_PARTIAL", "32c",
                 "-set", "_NET_WM_STRUT_PARTIAL",
-                f"0, 0, 0, {height}, 0, 0, 0, 0, 0, 0, {start_x}, {end_x}",
+                f"0, 0, 0, {bottom_reserve}, 0, 0, 0, 0, 0, 0, {start_x}, {end_x}",
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except Exception:
             pass
@@ -416,9 +433,83 @@ class KeyboardApp:
                 self.on_focus_event,
                 "object:state-changed:focused",
             )
+            pyatspi.Registry.registerEventListener(
+                self.on_text_activity,
+                "object:text-caret-moved",
+            )
+            pyatspi.Registry.registerEventListener(
+                self.on_text_activity,
+                "object:state-changed:editable",
+            )
+            pyatspi.Registry.registerEventListener(
+                self.on_window_activate,
+                "window:activate",
+            )
         except Exception:
             pass
         return False
+
+    def on_text_activity(self, event):
+        try:
+            source = event.source
+        except Exception:
+            return
+        if self.accessible_is_editable(source):
+            self.update_enter_mode(source)
+            GLib.idle_add(self.show_keyboard)
+
+    def on_window_activate(self, _event):
+        GLib.timeout_add(120, self.poll_focused_editable)
+
+    def find_focused_descendant(self, root, max_nodes=3000):
+        if pyatspi is None or root is None:
+            return None
+        stack = [root]
+        seen = 0
+        while stack and seen < max_nodes:
+            obj = stack.pop()
+            seen += 1
+            try:
+                state = obj.getState()
+                if state.contains(pyatspi.STATE_FOCUSED):
+                    return obj
+                count = obj.childCount
+                # Reverse so the first children remain first in DFS.
+                for i in range(count - 1, -1, -1):
+                    child = obj.getChildAtIndex(i)
+                    if child is not None:
+                        stack.append(child)
+            except Exception:
+                continue
+        return None
+
+    def poll_focused_editable(self):
+        if pyatspi is None:
+            return True
+        try:
+            desktop = pyatspi.Registry.getDesktop(0)
+            for ai in range(desktop.childCount):
+                app = desktop.getChildAtIndex(ai)
+                if app is None:
+                    continue
+                for wi in range(app.childCount):
+                    win = app.getChildAtIndex(wi)
+                    if win is None:
+                        continue
+                    try:
+                        state = win.getState()
+                        if not state.contains(pyatspi.STATE_ACTIVE):
+                            continue
+                    except Exception:
+                        continue
+                    focused = self.find_focused_descendant(win)
+                    if focused is not None and self.accessible_is_editable(focused):
+                        self.update_enter_mode(focused)
+                        self.show_keyboard()
+                        return True
+        except Exception:
+            pass
+        return True
 
     def accessible_is_editable(self, obj):
         if obj is None or pyatspi is None:
