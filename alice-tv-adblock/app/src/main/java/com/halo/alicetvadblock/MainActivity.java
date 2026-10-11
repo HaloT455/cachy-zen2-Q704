@@ -15,6 +15,8 @@ public class MainActivity extends Activity {
     private static final int REQ_VPN = 1001;
     private TextView status;
     private Button youtubeButton;
+    private Button ocrButton;
+    private Button muteButton;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -57,12 +59,28 @@ public class MainActivity extends Activity {
         });
         root.addView(youtubeButton);
 
+        ocrButton = button("");
+        ocrButton.setOnClickListener(v -> {
+            boolean next = !getPreferences().getBoolean("youtube_ocr", true);
+            getPreferences().edit().putBoolean("youtube_ocr", next).apply();
+            refresh();
+        });
+        root.addView(ocrButton);
+
+        muteButton = button("");
+        muteButton.setOnClickListener(v -> {
+            boolean next = !getPreferences().getBoolean("mute_unskippable", false);
+            getPreferences().edit().putBoolean("mute_unskippable", next).apply();
+            refresh();
+        });
+        root.addView(muteButton);
+
         Button access = button("MỞ CÀI ĐẶT ACCESSIBILITY");
         access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(access);
 
         TextView note = new TextView(this);
-        note.setText("\nDNS riêng hiện có của TV không bị app xóa hay ghi đè.\nYouTube gốc của Google được giữ nguyên. App chỉ tự bấm Skip/Bỏ qua quảng cáo khi nút xuất hiện; quảng cáo không có nút Skip thì Android không cho chặn 100% chỉ bằng DNS/VPN.");
+        note.setText("\nYouTube GỐC được giữ nguyên. AI OCR nhận diện chữ trên màn hình cục bộ, không gửi ảnh đi. Phát hiện nút Skip thì tự bấm. Nếu chọn tắt tiếng, khi nghi là quảng cáo bắt buộc app sẽ tạm mute rồi khôi phục. Không thể gỡ 100% quảng cáo bắt buộc chỉ bằng công cụ bên ngoài.\n\nCấu hình dns.adguard-dns.com của TV không bị ghi đè. VPN DNS là tùy chọn RIÊNG (có thể ảnh hưởng tuyến DNS đang dùng).");
         note.setTextSize(15f);
         root.addView(note, new LinearLayout.LayoutParams(-1, -2));
 
@@ -117,8 +135,14 @@ public class MainActivity extends Activity {
     private void refresh() {
         boolean requested = getPreferences().getBoolean("vpn_requested", false);
         boolean yt = getPreferences().getBoolean("youtube_adskip", true);
+        boolean ocr = getPreferences().getBoolean("youtube_ocr", true);
+        boolean mute = getPreferences().getBoolean("mute_unskippable", false);
         status.setText("DNS/VPN runtime: " + (requested ? "ĐÃ BẬT / đang khởi tạo" : "TẮT")
-                + "\nYouTube auto-skip: " + (yt ? "BẬT" : "TẮT"));
-        youtubeButton.setText("YOUTUBE GỐC - TỰ BỎ QUA QUẢNG CÁO: " + (yt ? "BẬT" : "TẮT"));
+                + "\nYouTube auto-skip: " + (yt ? "BẬT" : "TẮT")
+                + "\nNhận diện bằng AI OCR: " + (ocr ? "BẬT" : "TẮT")
+                + "\nTự tắt tiếng quảng cáo: " + (mute ? "BẬT" : "TẮT"));
+        youtubeButton.setText("YOUTUBE GỐC - AUTO SKIP: " + (yt ? "BẬT" : "TẮT"));
+        ocrButton.setText("AI NHẬN DIỆN ẢNH OFFLINE: " + (ocr ? "BẬT" : "TẮT"));
+        muteButton.setText("TẮT TIẾNG KHI NGHI LÀ QUẢNG CÁO: " + (mute ? "BẬT" : "TẮT"));
     }
 }
