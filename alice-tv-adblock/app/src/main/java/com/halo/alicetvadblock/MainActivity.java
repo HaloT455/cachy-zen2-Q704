@@ -51,8 +51,8 @@ public class MainActivity extends Activity {
 
         youtubeButton = button("");
         youtubeButton.setOnClickListener(v -> {
-            boolean now = !getPreferences().getBoolean("youtube_redirect", true);
-            getPreferences().edit().putBoolean("youtube_redirect", now).apply();
+            boolean now = !getPreferences().getBoolean("youtube_adskip", true);
+            getPreferences().edit().putBoolean("youtube_adskip", now).apply();
             refresh();
         });
         root.addView(youtubeButton);
@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
         root.addView(access);
 
         TextView note = new TextView(this);
-        note.setText("\nDNS riêng hiện có của TV không bị app xóa hay ghi đè.\nYouTube stock không thể lọc 100% bằng DNS; chế độ YouTube sẽ chuyển sang SmartTube nếu máy đã cài.");
+        note.setText("\nDNS riêng hiện có của TV không bị app xóa hay ghi đè.\nYouTube gốc của Google được giữ nguyên. App chỉ tự bấm Skip/Bỏ qua quảng cáo khi nút xuất hiện; quảng cáo không có nút Skip thì Android không cho chặn 100% chỉ bằng DNS/VPN.");
         note.setTextSize(15f);
         root.addView(note, new LinearLayout.LayoutParams(-1, -2));
 
@@ -116,9 +116,9 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         boolean requested = getPreferences().getBoolean("vpn_requested", false);
-        boolean yt = getPreferences().getBoolean("youtube_redirect", true);
+        boolean yt = getPreferences().getBoolean("youtube_adskip", true);
         status.setText("DNS/VPN runtime: " + (requested ? "ĐÃ BẬT / đang khởi tạo" : "TẮT")
-                + "\nYouTube redirect: " + (yt ? "BẬT" : "TẮT"));
-        youtubeButton.setText("CHẾ ĐỘ YOUTUBE: " + (yt ? "BẬT" : "TẮT"));
+                + "\nYouTube auto-skip: " + (yt ? "BẬT" : "TẮT"));
+        youtubeButton.setText("YOUTUBE GỐC - TỰ BỎ QUA QUẢNG CÁO: " + (yt ? "BẬT" : "TẮT"));
     }
 }
