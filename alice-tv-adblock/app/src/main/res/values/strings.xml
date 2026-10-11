@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">Alice TV AdBlock</string>
-    <string name="accessibility_description">Redirects the dedicated YouTube key and official YouTube launch to SmartTube when enabled.</string>
+    <string name="accessibility_description">Automatically clicks Skip Ad / Bỏ qua quảng cáo in the official YouTube TV app when available.</string>
 </resources>
